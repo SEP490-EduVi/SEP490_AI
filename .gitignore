@@ -7,11 +7,14 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+credentials/
+temp_downloads/
+
+# Distribution / packaging
 .Python
 build/
 develop-eggs/
 dist/
-downloads/
 eggs/
 .eggs/
 lib/
