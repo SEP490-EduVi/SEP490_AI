@@ -1,0 +1,15 @@
+# GCS
+google-cloud-storage==2.18.2
+
+# File extraction
+pdfplumber==0.11.4
+python-docx==1.1.2
+
+# Neo4j
+neo4j==5.26.0
+
+# Gemini LLM
+google-generativeai==0.8.3
+
+# Shared
+python-dotenv==1.0.1
