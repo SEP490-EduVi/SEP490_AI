@@ -1,30 +1,22 @@
-"""Download files from Google Cloud Storage."""
+"""Download files from GCS to local temp directory."""
 
 import os
+import logging
 from google.cloud import storage
 from config import Config
 
+logger = logging.getLogger(__name__)
+
 
 def download_from_gcs(gcs_uri: str) -> str:
-    """
-    Download a file from Google Cloud Storage to a local temp directory.
-
-    Args:
-        gcs_uri: Either a full gs:// URI  (gs://bucket/path/to/file.pdf)
-                 or just the blob path   (path/to/file.pdf).
-
-    Returns:
-        The local file path of the downloaded file.
-    """
+    """Download from GCS (full gs:// URI or blob path). Returns local path."""
     Config.validate()
 
     # Parse the URI
     if gcs_uri.startswith("gs://"):
-        # gs://bucket-name/path/to/file.pdf
         without_scheme = gcs_uri[len("gs://"):]
         bucket_name, blob_name = without_scheme.split("/", 1)
     else:
-        # Treat as a blob path inside the configured bucket
         bucket_name = Config.GCS_BUCKET_NAME
         blob_name = gcs_uri
 
@@ -37,7 +29,6 @@ def download_from_gcs(gcs_uri: str) -> str:
     local_path = os.path.join(Config.TEMP_DIR, filename)
 
     blob.download_to_filename(local_path)
-    print(f"[GCS] Downloaded  : {gcs_uri}")
-    print(f"[GCS] Saved to    : {local_path}")
+    logger.info("Downloaded %s -> %s", gcs_uri, local_path)
 
     return local_path

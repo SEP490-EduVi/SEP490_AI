@@ -1,0 +1,109 @@
+# docker-compose.yml — All AI services + infrastructure
+# Usage: docker-compose up           (starts everything)
+#        docker-compose up -d        (starts in background)
+#        docker-compose logs -f      (follow logs)
+#
+# For local dev (Python running on host, not in Docker):
+#   docker-compose up rabbitmq redis
+#   Then run `python main.py` directly on your machine.
+
+services:
+
+  # ── RabbitMQ ────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"      # AMQP protocol
+      - "15672:15672"    # Management UI → http://localhost:15672
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASSWORD: guest
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - eduvi
+
+  # ── Redis ───────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: redis-cli ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - eduvi
+
+  # ── Lesson Analysis Worker ──────────────────────────────────────────
+  lesson-analysis:
+    build:
+      context: ./lesson_analysis
+      dockerfile: Dockerfile
+    container_name: lesson-analysis
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # RabbitMQ
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      # Neo4j (Aura — cloud hosted)
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      # Google Cloud
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+    volumes:
+      - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+    networks:
+      - eduvi
+
+  # ── Textbook Ingestion Worker ───────────────────────────────────────
+  # textbook-ingestion:
+  #   build:
+  #     context: ./textbook_ingestion
+  #     dockerfile: Dockerfile
+  #   container_name: textbook-ingestion
+  #   depends_on:
+  #     rabbitmq:
+  #       condition: service_healthy
+  #   environment:
+  #     # RabbitMQ
+  #     RABBITMQ_HOST: rabbitmq
+  #     RABBITMQ_PORT: 5672
+  #     RABBITMQ_USER: guest
+  #     RABBITMQ_PASSWORD: guest
+  #     # Neo4j (Aura — cloud hosted)
+  #     NEO4J_URI: ${NEO4J_URI}
+  #     NEO4J_USER: ${NEO4J_USER:-neo4j}
+  #     NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+  #     # Google Cloud
+  #     GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+  #     GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+  #     GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+  #   volumes:
+  #     - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
+  #   restart: unless-stopped
+  #   networks:
+  #     - eduvi
+
+networks:
+  eduvi:
+    driver: bridge

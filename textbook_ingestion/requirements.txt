@@ -1,18 +1,17 @@
 # GCS
 google-cloud-storage==2.18.2
 
-# File extraction
-pdfplumber==0.11.4
+# File extraction (DOCX only — PDFs use Vision OCR directly)
 python-docx==1.1.2
+
+# OCR (Google Vision — processes PDFs natively, no Poppler needed)
+google-cloud-vision==3.7.4
 
 # Neo4j
 neo4j==5.26.0
 
 # Gemini LLM via Vertex AI (new google-genai SDK)
 google-genai>=1.0.0
-
-# RabbitMQ
-pika==1.3.2
 
 # Shared
 python-dotenv==1.0.1
