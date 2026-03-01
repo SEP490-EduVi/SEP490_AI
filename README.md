@@ -58,7 +58,7 @@ The system communicates with the ASP.NET backend via **RabbitMQ**:
   "productId": 7,
   "gcsUri": "gs://bucket/path/to/file.pdf",
   "subjectCode": "dia_li",
-  "gradeCode": "lop_10",
+  "gradeCode": "10",
   "lessonCode": "dia_li_10_bai_1"
 }
 ```

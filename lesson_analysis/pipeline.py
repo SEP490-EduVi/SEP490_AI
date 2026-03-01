@@ -22,6 +22,36 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[str, int, str], None]  # (step, progress, detail)
 
 
+def _build_full_lesson_id(subject: str, grade: str, lesson_code: str) -> str:
+    """
+    Build the full Neo4j lesson ID from parts.
+
+    Neo4j ID format: {subject}_lop_{grade}_L{number}
+
+    Examples:
+        ("dia_li", "10", "bai_1")              → "dia_li_lop_10_L1"
+        ("dia_li", "10", "dia_li_lop_10_L1")   → "dia_li_lop_10_L1"  (already full)
+        ("dia_li", "lop_10", "bai_1")          → "dia_li_lop_10_L1"  (strips prefix)
+    """
+    # If it already looks like a full ID (contains subject prefix), return as-is
+    if subject and lesson_code.startswith(subject):
+        return lesson_code
+
+    # Extract grade number: "lop_10" → "10", "10" → "10"
+    grade_number = grade.replace("lop_", "") if grade.startswith("lop_") else grade
+
+    # Extract lesson number from lesson code: "bai_1" → "1"
+    import re
+    match = re.search(r"(\d+)$", lesson_code)
+    lesson_number = match.group(1) if match else lesson_code
+
+    # Build: dia_li_lop_10_L1
+    if subject and grade_number:
+        return f"{subject}_lop_{grade_number}_L{lesson_number}"
+
+    return lesson_code
+
+
 def run(
     gcs_uri: str,
     subject: str,
@@ -76,9 +106,13 @@ def run(
 
         # ── Step 3: Resolve lesson ────────────────────────────────────
         if lesson_id:
-            # Lesson ID provided by the main system — skip LLM identification
-            _progress("fetching_data", 45, f"Fetching standard data for lesson {lesson_id}")
-            matched_id = lesson_id
+            # Build full Neo4j ID from parts if needed
+            # e.g. ("dia_li", "lop_10", "bai_1") → "dia_li_10_bai_1"
+            matched_id = _build_full_lesson_id(subject, grade, lesson_id)
+            if matched_id != lesson_id:
+                logger.info("Resolved lesson ID: %s → %s", lesson_id, matched_id)
+
+            _progress("fetching_data", 45, f"Fetching standard data for lesson {matched_id}")
             matched_name = lesson_id  # Will be enriched from Neo4j data if available
             confidence = "provided"
 
