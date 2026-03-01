@@ -32,6 +32,7 @@ def publish_progress(
     channel: pika.channel.Channel,
     task_id: str,
     user_id: str,
+    product_id: int | None,
     status: str,
     step: str,
     progress: int,
@@ -43,6 +44,7 @@ def publish_progress(
     message = {
         "taskId": task_id,
         "userId": user_id,
+        "productId": product_id,
         "status": status,
         "step": step,
         "progress": progress,

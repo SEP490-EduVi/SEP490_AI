@@ -45,6 +45,7 @@ def _on_message(channel, method, _properties, body):
         message = json.loads(body)
         task_id = message["taskId"]
         user_id = message["userId"]
+        product_id = message.get("productId")
         gcs_uri = message["gcsUri"]
         subject = message.get("subjectCode", "")
         grade = message.get("gradeCode", "")
@@ -56,12 +57,12 @@ def _on_message(channel, method, _properties, body):
         )
 
         # Publish "started"
-        publish_progress(channel, task_id, user_id, "processing", "started", 0,
+        publish_progress(channel, task_id, user_id, product_id, "processing", "started", 0,
                          detail="Task received, starting pipeline")
 
         # Build a progress callback that publishes to RabbitMQ
         def on_progress(step: str, progress: int, detail: str = "") -> None:
-            publish_progress(channel, task_id, user_id, "processing", step, progress,
+            publish_progress(channel, task_id, user_id, product_id, "processing", step, progress,
                              detail=detail)
 
         # Run the pipeline
@@ -74,7 +75,7 @@ def _on_message(channel, method, _properties, body):
         )
 
         # Publish completed
-        publish_progress(channel, task_id, user_id, "completed", "completed", 100,
+        publish_progress(channel, task_id, user_id, product_id, "completed", "completed", 100,
                          result=result)
 
         logger.info("Task %s completed successfully.", task_id)
@@ -89,6 +90,7 @@ def _on_message(channel, method, _properties, body):
                 channel,
                 message.get("taskId", "unknown"),
                 message.get("userId", "unknown"),
+                message.get("productId"),
                 "failed", "error", 0,
                 error=str(exc),
                 detail=error_msg,

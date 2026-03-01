@@ -1,6 +1,6 @@
 # SEP490_AI
 
-Repository that handles all tasks related to AI, PDF, Docx Converter
+AI services for the EduVi platform — lesson plan analysis, textbook ingestion, and more.
 
 ---
 
@@ -8,71 +8,170 @@ Repository that handles all tasks related to AI, PDF, Docx Converter
 
 ```
 SEP490_AI/
-├── input_extraction/       # Worker service: extracts text from PDF/DOCX files
-│   ├── main.py             # Entry point (CLI / future RabbitMQ mode)
-│   ├── config.py           # Configuration loader (.env)
-│   ├── gcs_handler.py      # Google Cloud Storage file downloader
-│   ├── extractor.py        # Text extraction (pdfplumber & python-docx)
-│   ├── worker.py           # Orchestrator: download → extract → output
-│   ├── rabbitmq_consumer.py# Placeholder for future RabbitMQ integration
-│   ├── requirements.txt    # Python dependencies
-│   ├── .env.example        # Environment variable template
-│   ├── credentials/        # GCS service account key (not committed)
-│   └── temp_downloads/     # Temporary file storage during processing
-└── README.md
+├── docker-compose.yml          # All services + infrastructure
+├── redeploy.bat                # Quick rebuild & restart script
+├── DOCKER_GUIDE.txt            # Docker command reference
+├── lesson_analysis/            # Worker: analyzes lesson plans against textbook standards
+│   ├── main.py                 # Entry point (RabbitMQ consumer + CLI mode)
+│   ├── config.py               # Configuration loader (.env)
+│   ├── pipeline.py             # Orchestrator: download → extract → evaluate
+│   ├── rabbitmq_utils.py       # RabbitMQ connection, queue declaration, progress publishing
+│   ├── gcs_handler.py          # Google Cloud Storage file downloader
+│   ├── extractor.py            # Text extraction (PDF/DOCX)
+│   ├── evaluator.py            # LLM-based lesson plan evaluation (Gemini)
+│   ├── neo4j_client.py         # Neo4j queries (books, lessons, concepts, locations)
+│   ├── Dockerfile              # Container build definition
+│   └── requirements.txt        # Python dependencies
+├── textbook_ingestion/         # Worker: ingests textbook data into Neo4j (disabled)
+│   ├── main.py
+│   ├── pipeline.py
+│   ├── chunker.py
+│   ├── extractor.py
+│   ├── keyword_extractor.py
+│   ├── neo4j_loader.py
+│   ├── gcs_handler.py
+│   └── entity_generator/       # Subject-specific entity generators
+├── private/                    # Credentials (not committed)
+│   └── gcp-key.json
+└── test/                       # Manual test scripts
+    ├── test_neo4j.py
+    └── test_vertex_ai.py
 ```
 
 ---
 
-## Services
+## Architecture
 
-### 1. Input Extraction Service (`input_extraction/`)
+The system communicates with the ASP.NET backend via **RabbitMQ**:
 
-A worker service that downloads PDF/DOCX files from **Google Cloud Storage** and extracts all text content from them.
+1. Backend publishes a task message to `lesson.analysis.requests`
+2. The lesson-analysis worker picks it up, processes it, and publishes progress/results to `pipeline.results`
+3. Backend consumes results and pushes them to the frontend via SignalR
 
-**Tech Stack:**
-- Python 3.10+
-- `pdfplumber` – PDF text extraction
-- `python-docx` – DOCX text extraction
-- `google-cloud-storage` – GCS file download
-- `pika` – RabbitMQ client (future use)
+### Message Formats
 
-**Current Mode:** Manual – pass file URIs via CLI  
-**Future Mode:** Automatic – receives messages from RabbitMQ
+**Incoming message** (from backend):
+```json
+{
+  "taskId": "546de3de-e4c7-47fa-b6cd-9c6bad1e1d0b",
+  "userId": "5",
+  "productId": 7,
+  "gcsUri": "gs://bucket/path/to/file.pdf",
+  "subjectCode": "dia_li",
+  "gradeCode": "lop_10",
+  "lessonCode": "dia_li_10_bai_1"
+}
+```
 
-#### Quick Start
+**Outgoing message** (progress updates & final result):
+```json
+{
+  "taskId": "546de3de-e4c7-47fa-b6cd-9c6bad1e1d0b",
+  "userId": "5",
+  "productId": 7,
+  "status": "completed",
+  "step": "completed",
+  "progress": 100,
+  "detail": null,
+  "result": { "..." },
+  "error": null
+}
+```
 
-1. **Install dependencies:**
-   ```bash
-   cd input_extraction
-   pip install -r requirements.txt
-   ```
+Status values: `processing` → `completed` | `failed`
 
-2. **Configure environment:**
-   ```bash
-   copy .env.example .env
-   ```
-   Edit `.env` and set:
-   - `GCS_BUCKET_NAME` – your Google Cloud Storage bucket name
-   - `GOOGLE_APPLICATION_CREDENTIALS` – path to your GCS service account JSON key
+---
 
-3. **Run:**
-   ```bash
-   # Full GCS URI
-   python main.py gs://your-bucket/path/to/file.pdf
+## Services (Docker Compose)
 
-   # Blob path only (bucket name from .env)
-   python main.py path/to/file.docx
+| Service | Port | Description |
+|---|---|---|
+| **lesson-analysis** | — | Lesson plan analysis worker (RabbitMQ consumer) |
+| **rabbitmq** | `5672` / `15672` | Message broker + [Management UI](http://localhost:15672) (`guest`/`guest`) |
+| **redis** | `6379` | Cache (future use) |
+| **dozzle** | `9999` | [Real-time log viewer](http://localhost:9999) for all containers |
 
-   # Multiple files
-   python main.py file1.pdf file2.docx
-   ```
+---
+
+## Quick Start
+
+### Prerequisites
+- Docker & Docker Compose
+- A `.env` file in the project root with:
+  ```
+  NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
+  NEO4J_USER=neo4j
+  NEO4J_PASSWORD=your_password
+  GCS_BUCKET_NAME=your_bucket
+  GOOGLE_CLOUD_PROJECT=your_project
+  ```
+- GCP service account key at `private/gcp-key.json`
+
+### Start everything
+```bash
+docker-compose up -d
+```
+
+### After code changes
+```bash
+.\redeploy.bat
+```
+
+### View logs
+```bash
+# Terminal
+docker-compose logs -f lesson-analysis
+
+# Browser
+# http://localhost:9999  (Dozzle)
+```
+
+### Stop everything
+```bash
+docker-compose down
+```
+
+> See `DOCKER_GUIDE.txt` for the full command reference.
+
+---
+
+## Local Development (without Docker)
+
+Run only infrastructure in Docker, then run Python on your host:
+
+```bash
+# Start RabbitMQ + Redis only
+docker-compose up -d rabbitmq redis
+
+# Run the worker locally
+cd lesson_analysis
+pip install -r requirements.txt
+python main.py
+```
+
+### CLI Mode (no RabbitMQ needed)
+```bash
+python main.py --cli <gcs_uri> <subject> <grade> [lesson_id]
+```
+
+---
+
+## Lesson Analysis Pipeline
+
+1. **Download** — fetch the lesson plan file from GCS
+2. **Extract text** — parse PDF or DOCX into raw text
+3. **Resolve lesson** — match to a Neo4j lesson (by ID or via LLM identification)
+4. **Fetch standard data** — load concepts, locations, and sections from Neo4j
+5. **Evaluate** — use Gemini to compare the lesson plan against the curriculum standards
+6. **Return result** — publish evaluation result back via RabbitMQ
 
 ---
 
 ## Roadmap
 
-- [x] Input Extraction Service (PDF & DOCX)
-- [ ] RabbitMQ integration for automatic message-driven processing
-- [ ] Docker containerization
+- [x] Lesson Analysis Service (PDF & DOCX)
+- [x] RabbitMQ integration for message-driven processing
+- [x] Docker containerization
+- [x] Dozzle log viewer for monitoring
+- [ ] Textbook Ingestion Service (currently disabled)
 - [ ] Additional AI-powered services (TBD)

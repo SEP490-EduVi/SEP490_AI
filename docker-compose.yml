@@ -104,6 +104,18 @@ services:
   #   networks:
   #     - eduvi
 
+  # ── Dozzle (Real-time Log Viewer) ───────────────────────────────────
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    ports:
+      - "9999:8080"     # Web UI → http://localhost:9999
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    networks:
+      - eduvi
+
 networks:
   eduvi:
     driver: bridge

@@ -1,0 +1,109 @@
+==============================================================
+  DOCKER GUIDE — SEP490_AI
+  Run all commands from: D:\SEP490\SEP490_AI
+==============================================================
+
+--------------------------------------------------------------
+ 1. START ALL SERVICES
+--------------------------------------------------------------
+docker-compose up -d
+
+--------------------------------------------------------------
+ 2. STOP ALL SERVICES (containers stay, just stopped)
+--------------------------------------------------------------
+docker-compose stop
+
+--------------------------------------------------------------
+ 3. START AGAIN (after stop, no rebuild)
+--------------------------------------------------------------
+docker-compose start
+
+--------------------------------------------------------------
+ 4. STOP & REMOVE ALL CONTAINERS
+--------------------------------------------------------------
+docker-compose down
+
+--------------------------------------------------------------
+ 5. STOP & REMOVE EVERYTHING (containers + volumes + images)
+--------------------------------------------------------------
+docker-compose down -v --rmi all
+
+--------------------------------------------------------------
+ 6. REBUILD & RESTART A SINGLE SERVICE (after code changes)
+--------------------------------------------------------------
+docker-compose stop lesson-analysis
+docker-compose rm -f lesson-analysis
+docker-compose build --no-cache lesson-analysis
+docker-compose up -d lesson-analysis
+
+  Or simply run:  .\redeploy.bat
+
+--------------------------------------------------------------
+ 7. REBUILD & RESTART ALL SERVICES
+--------------------------------------------------------------
+docker-compose down
+docker-compose build --no-cache
+docker-compose up -d
+
+--------------------------------------------------------------
+ 8. VIEW LOGS
+--------------------------------------------------------------
+# All services:
+docker-compose logs -f
+
+# Single service:
+docker-compose logs -f lesson-analysis
+docker-compose logs -f rabbitmq
+docker-compose logs -f redis
+docker-compose logs -f dozzle
+
+# Last 100 lines only:
+docker-compose logs --tail=100 lesson-analysis
+
+--------------------------------------------------------------
+ 9. CHECK STATUS OF CONTAINERS
+--------------------------------------------------------------
+docker-compose ps
+
+--------------------------------------------------------------
+ 10. RESTART A SINGLE SERVICE (no rebuild)
+--------------------------------------------------------------
+docker-compose restart lesson-analysis
+docker-compose restart rabbitmq
+docker-compose restart redis
+
+--------------------------------------------------------------
+ 11. ENTER A RUNNING CONTAINER (shell access)
+--------------------------------------------------------------
+docker exec -it lesson-analysis /bin/bash
+docker exec -it rabbitmq /bin/bash
+docker exec -it redis /bin/sh
+
+--------------------------------------------------------------
+ 12. CHECK RESOURCE USAGE (CPU, memory)
+--------------------------------------------------------------
+docker stats
+
+--------------------------------------------------------------
+ 13. CLEAN UP UNUSED IMAGES & VOLUMES
+--------------------------------------------------------------
+docker system prune -f
+docker volume prune -f
+docker image prune -f
+
+--------------------------------------------------------------
+ 14. WEB UIs
+--------------------------------------------------------------
+RabbitMQ Management:  http://localhost:15672  (guest / guest)
+Dozzle (Log Viewer):  http://localhost:9999
+
+==============================================================
+ QUICK REFERENCE
+==============================================================
+  Code changed?     →  .\redeploy.bat
+  Start everything  →  docker-compose up -d
+  Stop everything   →  docker-compose stop
+  See what's running →  docker-compose ps
+  Check logs        →  docker-compose logs -f lesson-analysis
+  Full reset        →  docker-compose down -v --rmi all
+==============================================================
