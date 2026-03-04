@@ -75,6 +75,33 @@ services:
     networks:
       - eduvi
 
+  # ── Slide Generator Worker ───────────────────────────────────────────
+  slide-generator:
+    build:
+      context: ./slide_generator
+      dockerfile: Dockerfile
+    container_name: slide-generator
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # RabbitMQ
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      # Google Cloud
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+    volumes:
+      - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+    networks:
+      - eduvi
+
   # ── Textbook Ingestion Worker ───────────────────────────────────────
   # textbook-ingestion:
   #   build:

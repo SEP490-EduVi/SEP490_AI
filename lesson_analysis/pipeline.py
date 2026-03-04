@@ -201,6 +201,8 @@ def run(
                 "confidence": confidence,
             },
             "evaluation": evaluation,
+            "lesson_plan_text": raw_text,
+            "textbook_sections": section_content,
         }
 
         _progress("completed", 100, "Pipeline finished successfully")
