@@ -38,6 +38,12 @@ class Config:
         "medium":   (10, 15),
         "detailed": (15, 20),
     }
+    # Interactive slide slots (QUIZ / FLASHCARD / FILL_BLANK) — on top of content slides
+    INTERACTIVE_SLIDE_MAP: dict = {
+        "short":    1,
+        "medium":   2,
+        "detailed": 4,
+    }
     DEFAULT_SLIDE_RANGE: str = "medium"
 
     @classmethod

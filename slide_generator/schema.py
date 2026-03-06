@@ -8,7 +8,6 @@ that checks generated output against the FE contract before publishing.
 from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
-from typing import Literal, Union
 
 
 # ── ID generation ─────────────────────────────────────────────────────
@@ -128,29 +127,41 @@ def make_quiz_block(title: str, questions: list[dict]) -> dict:
     }
 
 
-def make_flashcard_block(front: str, back: str) -> dict:
-    """Create a BLOCK node with FLASHCARD content."""
+def make_flashcard_block(pairs: list[dict]) -> dict:
+    """
+    Create a BLOCK node with FLASHCARD content.
+    pairs: list of {front: str, back: str}
+    """
+    cards = [
+        {"id": gen_id("fc-"), "front": p["front"], "back": p["back"]}
+        for p in pairs
+    ]
     return {
         "id": gen_id("block-"),
         "type": "BLOCK",
         "content": {
             "type": "FLASHCARD",
-            "front": front,
-            "back": back,
+            "cards": cards,
         },
         "children": [],
     }
 
 
-def make_fill_blank_block(sentence: str, blanks: list[str]) -> dict:
-    """Create a BLOCK node with FILL_BLANK content."""
+def make_fill_blank_block(exercises: list[dict]) -> dict:
+    """
+    Create a BLOCK node with FILL_BLANK content.
+    exercises: list of {sentence: str, blanks: list[str]}
+    """
+    items = [
+        {"id": gen_id("fb-"), "sentence": ex["sentence"], "blanks": ex["blanks"]}
+        for ex in exercises
+    ]
     return {
         "id": gen_id("block-"),
         "type": "BLOCK",
         "content": {
             "type": "FILL_BLANK",
-            "sentence": sentence,
-            "blanks": blanks,
+            "exercises": items,
         },
         "children": [],
     }
@@ -174,17 +185,19 @@ def make_card(
     background_color: str | None = None,
     background_image: str | None = None,
 ) -> dict:
-    """Create a CARD node."""
+    """Create a CARD node. Optional fields are omitted when None."""
     card: dict = {
         "id": gen_id("card-"),
         "type": "CARD",
         "title": title,
-        "backgroundColor": background_color,
-        "backgroundImage": background_image,
         "children": children,
     }
     if template_id:
         card["templateId"] = template_id
+    if background_color is not None:
+        card["backgroundColor"] = background_color
+    if background_image is not None:
+        card["backgroundImage"] = background_image
     return card
 
 
@@ -232,16 +245,14 @@ def _validate_block(block: dict, path: str) -> None:
         if not isinstance(content.get("alt"), str):
             raise ValidationError(f"{path}: IMAGE content missing alt")
     if ctype == "QUIZ":
-        if not isinstance(content.get("questions"), list):
+        if not isinstance(content.get("questions"), list) or not content["questions"]:
             raise ValidationError(f"{path}: QUIZ content missing questions list")
     if ctype == "FLASHCARD":
-        if not isinstance(content.get("front"), str) or not isinstance(content.get("back"), str):
-            raise ValidationError(f"{path}: FLASHCARD content missing front/back")
+        if not isinstance(content.get("cards"), list) or not content["cards"]:
+            raise ValidationError(f"{path}: FLASHCARD content missing cards list")
     if ctype == "FILL_BLANK":
-        if not isinstance(content.get("sentence"), str):
-            raise ValidationError(f"{path}: FILL_BLANK content missing sentence")
-        if not isinstance(content.get("blanks"), list):
-            raise ValidationError(f"{path}: FILL_BLANK content missing blanks list")
+        if not isinstance(content.get("exercises"), list) or not content["exercises"]:
+            raise ValidationError(f"{path}: FILL_BLANK content missing exercises list")
     if not isinstance(block.get("children"), list):
         raise ValidationError(f"{path}: children must be a list")
 

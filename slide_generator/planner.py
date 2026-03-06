@@ -14,7 +14,7 @@ import re
 from google import genai
 from google.genai import types
 from config import Config
-from templates import ALL_TEMPLATE_TYPES, IMAGE_TEMPLATE_TYPES
+from templates import ALL_TEMPLATE_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ TEMPLATES CÓ SẴN (6 template FE, tạo ra templateId):
 - template-005: Tiêu đề căn giữa + 3 cột text NGẮN. Dùng khi có ĐÚNG 3 loại/danh mục với mô tả ngắn.
 - template-006: Tiêu đề căn giữa + 3 cột text DÀY. Dùng so sánh 3 chiều chi tiết (mỗi mục cần 1 đoạn).
 
-CHÚ Ý: template-001 và template-002 YÊU CẦU có ảnh thực. Chỉ dùng nếu có ảnh phù hợp (bản đồ, biểu đồ, hình ảnh địa lý từ sách giáo khoa). Nếu không có ảnh, dùng template khác.
+CHÚ Ý: template-001 và template-002 sẽ tạo placeholder cho ảnh (giáo viên thêm ảnh sau). Dùng khi nội dung cần minh họa trực quan (bản đồ, biểu đồ, hình ảnh địa lý).
 
 FREEFORM (không có templateId, dùng cho các slide đặc biệt):
 - TITLE_CARD: Slide đầu tiên DUY NHẤT. Tên bài + thông tin môn học.
@@ -92,9 +92,8 @@ def plan_presentation(context: dict, slide_range: str) -> list[dict]:
           ...
         ]
     """
-    from config import Config
-
     min_slides, max_slides = Config.SLIDE_RANGE_MAP.get(slide_range, (10, 15))
+    interactive_count = Config.INTERACTIVE_SLIDE_MAP.get(slide_range, 2)
 
     # Build a concise textbook summary (cap at ~2000 chars to stay within context)
     textbook_summary = ""
@@ -138,11 +137,11 @@ Nội dung SGK (tóm tắt):
 Quy tắc bắt buộc:
 1. Slide đầu tiên PHẢI là TITLE_CARD
 2. Slide cuối cùng PHẢI là SUMMARY_CARD
-3. Số slide: tối thiểu {min_slides}, tối đa {max_slides}
+3. Số slide NỘI DUNG (không tính interactive): tối thiểu {min_slides}, tối đa {max_slides}
 4. Dùng đa dạng template, không lặp cùng 1 template 3 lần liên tiếp
 5. Đặt SECTION_DIV trước mỗi chủ đề lớn mới (nếu có từ 2 chủ đề trở lên)
-6. Đặt ít nhất 1 QUIZ_CARD hoặc FLASHCARD_CARD nếu có đủ khái niệm
-7. KHÔNG dùng template-001 hoặc template-002 trừ khi đề cập đến ảnh/bản đồ cụ thể
+6. NGOÀI các slide nội dung, thêm ĐÚNG {interactive_count} slide tương tác (QUIZ_CARD, FLASHCARD_CARD, hoặc FILL_BLANK_CARD — chọn loại phù hợp). Đặt chúng xen kẽ trong bài, KHÔNG gộp cuối cùng.
+7. Dùng template-001 hoặc template-002 khi slide cần minh họa trực quan (ảnh sẽ là placeholder)
 8. "focus" phải đủ chi tiết để AI có thể viết nội dung từ đó (1-2 câu mô tả rõ ràng)
 
 Trả về JSON array theo định dạng sau (CHỈ JSON, không có markdown):
@@ -157,8 +156,8 @@ Trả về JSON array theo định dạng sau (CHỈ JSON, không có markdown):
 ]
 """
 
-    logger.info("Calling Gemini for slide planning (range: %s, %d-%d slides)...",
-                slide_range, min_slides, max_slides)
+    logger.info("Calling Gemini for slide planning (range: %s, %d-%d content + %d interactive)...",
+                slide_range, min_slides, max_slides, interactive_count)
 
     response = _client.models.generate_content(
         model=Config.GEMINI_MODEL,

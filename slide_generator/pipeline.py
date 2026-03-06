@@ -59,9 +59,10 @@ def run(
     )
     subject = evaluation_result.get("subject", "")
     grade = evaluation_result.get("grade", "")
+    # Normalise: "lop_10" → "10", plain "10" stays "10"
+    if grade.startswith("lop_"):
+        grade = grade[4:]
     slide_range = preferences.get("slideRange", "medium")
-
-    _progress("started", 0, "Task received, starting slide generation")
 
     # ── Build context dict for Gemini calls ───────────────────────────
 
@@ -84,6 +85,9 @@ def run(
 
     slide_plan = plan_presentation(context, slide_range)
     total_slides = len(slide_plan)
+
+    if total_slides == 0:
+        raise ValueError("Planner returned an empty slide plan — cannot generate presentation")
 
     _progress(
         "planning", 15,
@@ -115,9 +119,7 @@ def run(
 
     _progress("assembling", 92, "Đang tổng hợp bài thuyết trình...")
 
-    document = assemble_document(lesson_name, slide_plan, slide_contents)
-
-    _progress("completed", 100, f"Hoàn tất! Bài thuyết trình có {total_slides} slide.")
+    document = assemble_document(lesson_name, slide_plan, slide_contents, subject=subject, grade=grade)
 
     # Return only the data the ASP.NET backend needs to store
     # (it will wrap this with its own id, createdAt, updatedAt)
