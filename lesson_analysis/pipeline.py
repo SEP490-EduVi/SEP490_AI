@@ -1,8 +1,9 @@
-"""Pipeline: Download → Extract → Fetch standard data → Evaluate."""
+"""Pipeline: Download → Extract → Fetch standard data → Evaluate (async)."""
 
+import asyncio
 import os
 import logging
-from typing import Callable
+from typing import Awaitable, Callable
 from gcs_handler import download_from_gcs
 from extractor import extract_text
 from neo4j_client import (
@@ -18,8 +19,8 @@ from evaluator import identify_lesson, evaluate_lesson_plan
 
 logger = logging.getLogger(__name__)
 
-# Type alias for progress callback
-ProgressCallback = Callable[[str, int, str], None]  # (step, progress, detail)
+# Type alias for async progress callback
+ProgressCallback = Callable[[str, int, str], Awaitable[None]]
 
 
 def _build_full_lesson_id(subject: str, grade: str, lesson_code: str) -> str:
@@ -52,7 +53,7 @@ def _build_full_lesson_id(subject: str, grade: str, lesson_code: str) -> str:
     return lesson_code
 
 
-def run(
+async def run(
     gcs_uri: str,
     subject: str,
     grade: str,
@@ -60,7 +61,7 @@ def run(
     on_progress: ProgressCallback | None = None,
 ) -> dict:
     """
-    Run the lesson-analysis pipeline.
+    Run the lesson-analysis pipeline (async).
 
     Args:
         gcs_uri:  GCS path to the lesson plan file.
@@ -68,7 +69,7 @@ def run(
         grade:    Grade code (e.g. "lop_10").
         lesson_id: Neo4j lesson ID (e.g. "dia_li_10_bai_1").
                    If provided, skips LLM lesson identification.
-        on_progress: Optional callback(step, progress, detail) for live updates.
+        on_progress: Optional async callback(step, progress, detail) for live updates.
 
     Flow (when lesson_id is provided):
       1. Download file from GCS
@@ -85,24 +86,24 @@ def run(
       6. Evaluate the lesson plan against the standard data
     """
 
-    def _progress(step: str, progress: int, detail: str = "") -> None:
+    async def _progress(step: str, progress: int, detail: str = "") -> None:
         """Log + invoke callback if provided."""
         logger.info("[%s] %d%% — %s", step, progress, detail)
         if on_progress:
-            on_progress(step, progress, detail)
+            await on_progress(step, progress, detail)
 
     local_path = None
     try:
         # ── Step 1: Download from GCS ─────────────────────────────────
-        _progress("downloading", 10, f"Downloading from GCS: {gcs_uri}")
-        local_path = download_from_gcs(gcs_uri)
+        await _progress("downloading", 10, f"Downloading from GCS: {gcs_uri}")
+        local_path = await asyncio.to_thread(download_from_gcs, gcs_uri)
 
         # ── Step 2: Extract text ──────────────────────────────────────
-        _progress("extracting_text", 25, "Extracting text from file...")
-        raw_text = extract_text(local_path)
+        await _progress("extracting_text", 25, "Extracting text from file...")
+        raw_text = await asyncio.to_thread(extract_text, local_path)
         if not raw_text:
             raise ValueError("No text could be extracted from %s" % gcs_uri)
-        _progress("extracting_text", 30, f"Extracted {len(raw_text)} characters")
+        await _progress("extracting_text", 30, f"Extracted {len(raw_text)} characters")
 
         # ── Step 3: Resolve lesson ────────────────────────────────────
         if lesson_id:
@@ -112,32 +113,34 @@ def run(
             if matched_id != lesson_id:
                 logger.info("Resolved lesson ID: %s → %s", lesson_id, matched_id)
 
-            _progress("fetching_data", 45, f"Fetching standard data for lesson {matched_id}")
+            await _progress("fetching_data", 45, f"Fetching standard data for lesson {matched_id}")
             matched_name = lesson_id  # Will be enriched from Neo4j data if available
             confidence = "provided"
 
-            standard_concepts = get_concepts_by_lesson_id(matched_id)
-            standard_locations = get_locations_by_lesson_id(matched_id)
-            section_content = get_sections_by_lesson_id(matched_id)
+            standard_concepts, standard_locations, section_content = await asyncio.gather(
+                asyncio.to_thread(get_concepts_by_lesson_id, matched_id),
+                asyncio.to_thread(get_locations_by_lesson_id, matched_id),
+                asyncio.to_thread(get_sections_by_lesson_id, matched_id),
+            )
 
         else:
             # Fallback: use LLM to identify the lesson
-            _progress("finding_book", 35, f"Finding book for {subject} - {grade}")
-            book = find_book(subject, grade)
+            await _progress("finding_book", 35, f"Finding book for {subject} - {grade}")
+            book = await asyncio.to_thread(find_book, subject, grade)
             if not book:
                 raise ValueError(
                     "No book found in Neo4j matching subject='%s', grade='%s'"
                     % (subject, grade)
                 )
 
-            _progress("identifying_lesson", 45, "Identifying lesson via LLM...")
-            available_lessons = list_lessons(book["id"])
+            await _progress("identifying_lesson", 45, "Identifying lesson via LLM...")
+            available_lessons = await asyncio.to_thread(list_lessons, book["id"])
             if not available_lessons:
                 raise ValueError(
                     "No lessons found in Neo4j for book %s" % book["id"]
                 )
 
-            match_result = identify_lesson(raw_text, available_lessons)
+            match_result = await identify_lesson(raw_text, available_lessons)
             matched_id = match_result.get("matched_lesson_id")
             matched_name = match_result.get("matched_lesson_name")
             confidence = match_result.get("confidence", "unknown")
@@ -147,26 +150,26 @@ def run(
                     "LLM could not match a lesson. Falling back to whole-book data."
                 )
 
-            _progress(
+            await _progress(
                 "identifying_lesson", 55,
                 f"Matched → {matched_name} (confidence: {confidence})"
             )
 
             # Fetch standard data
             if matched_id:
-                standard_concepts = get_concepts_by_lesson_id(matched_id)
-                standard_locations = get_locations_by_lesson_id(matched_id)
-                section_content = get_sections_by_lesson_id(matched_id)
-            else:
-                standard_concepts = get_standard_concepts(
-                    book["subject"], book["grade"]
+                standard_concepts, standard_locations, section_content = await asyncio.gather(
+                    asyncio.to_thread(get_concepts_by_lesson_id, matched_id),
+                    asyncio.to_thread(get_locations_by_lesson_id, matched_id),
+                    asyncio.to_thread(get_sections_by_lesson_id, matched_id),
                 )
-                standard_locations = get_standard_locations(
-                    book["subject"], book["grade"]
+            else:
+                standard_concepts, standard_locations = await asyncio.gather(
+                    asyncio.to_thread(get_standard_concepts, book["subject"], book["grade"]),
+                    asyncio.to_thread(get_standard_locations, book["subject"], book["grade"]),
                 )
                 section_content = []
 
-        _progress(
+        await _progress(
             "fetching_data", 60,
             f"Loaded {len(standard_concepts)} concepts, "
             f"{len(standard_locations)} locations, "
@@ -179,8 +182,8 @@ def run(
             )
 
         # ── Step 4: Evaluate via LLM ─────────────────────────────────
-        _progress("evaluating", 70, "Evaluating lesson plan via Gemini...")
-        evaluation = evaluate_lesson_plan(
+        await _progress("evaluating", 70, "Evaluating lesson plan via Gemini...")
+        evaluation = await evaluate_lesson_plan(
             raw_text,
             standard_concepts,
             standard_locations,
@@ -188,7 +191,7 @@ def run(
             section_content=section_content,
         )
 
-        _progress("evaluating", 90, "Evaluation complete, assembling result...")
+        await _progress("evaluating", 90, "Evaluation complete, assembling result...")
 
         # Assemble the final response
         result = {
@@ -205,7 +208,7 @@ def run(
             "textbook_sections": section_content,
         }
 
-        _progress("completed", 100, "Pipeline finished successfully")
+        await _progress("completed", 100, "Pipeline finished successfully")
         return result
 
     except Exception:

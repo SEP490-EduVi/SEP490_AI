@@ -1,35 +1,32 @@
-"""RabbitMQ utilities — connect, publish progress/results."""
+"""RabbitMQ utilities — async connect, publish progress/results via aio-pika."""
 
 import json
 import logging
-import pika
+import aio_pika
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 
-def get_connection() -> pika.BlockingConnection:
-    """Create a blocking connection to RabbitMQ."""
-    credentials = pika.PlainCredentials(Config.RABBITMQ_USER, Config.RABBITMQ_PASSWORD)
-    params = pika.ConnectionParameters(
+async def get_connection() -> aio_pika.abc.AbstractRobustConnection:
+    """Create a robust (auto-reconnecting) async connection to RabbitMQ."""
+    return await aio_pika.connect_robust(
         host=Config.RABBITMQ_HOST,
         port=Config.RABBITMQ_PORT,
-        virtual_host=Config.RABBITMQ_VIRTUAL_HOST,
-        credentials=credentials,
-        heartbeat=600,
-        blocked_connection_timeout=300,
+        login=Config.RABBITMQ_USER,
+        password=Config.RABBITMQ_PASSWORD,
+        virtualhost=Config.RABBITMQ_VIRTUAL_HOST,
     )
-    return pika.BlockingConnection(params)
 
 
-def declare_queues(channel: pika.channel.Channel) -> None:
+async def declare_queues(channel: aio_pika.abc.AbstractChannel) -> None:
     """Declare both request and result queues (idempotent)."""
-    channel.queue_declare(queue=Config.REQUEST_QUEUE, durable=True)
-    channel.queue_declare(queue=Config.RESULT_QUEUE, durable=True)
+    await channel.declare_queue(Config.REQUEST_QUEUE, durable=True)
+    await channel.declare_queue(Config.RESULT_QUEUE, durable=True)
 
 
-def publish_progress(
-    channel: pika.channel.Channel,
+async def publish_progress(
+    channel: aio_pika.abc.AbstractChannel,
     task_id: str,
     user_id: str,
     product_id: int | None,
@@ -52,14 +49,13 @@ def publish_progress(
         "result": result,
         "error": error,
     }
-    channel.basic_publish(
-        exchange="",
-        routing_key=Config.RESULT_QUEUE,
-        body=json.dumps(message, ensure_ascii=False),
-        properties=pika.BasicProperties(
-            delivery_mode=2,  # persistent
+    await channel.default_exchange.publish(
+        aio_pika.Message(
+            body=json.dumps(message, ensure_ascii=False).encode(),
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
             content_type="application/json",
         ),
+        routing_key=Config.RESULT_QUEUE,
     )
     logger.info(
         "Published → %s | task=%s status=%s step=%s progress=%d",

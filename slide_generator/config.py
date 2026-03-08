@@ -29,6 +29,11 @@ class Config:
     REQUEST_QUEUE: str = "slide.generation.requests"
     RESULT_QUEUE: str = "pipeline.results"
 
+    # ── Concurrency ────────────────────────────────────────────────────
+    # How many tasks can be processed concurrently in one container.
+    # Each task fires multiple Gemini API calls, so tune this against your Vertex AI quota.
+    PREFETCH_COUNT: int = int(os.getenv("SLIDE_PREFETCH_COUNT", "50"))
+
     # ── Gemini model ───────────────────────────────────────────────────
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
@@ -45,6 +50,11 @@ class Config:
         "detailed": 4,
     }
     DEFAULT_SLIDE_RANGE: str = "medium"
+
+    # ── Helicone Observability ─────────────────────────────────────────
+    # Set HELICONE_API_KEY to route all Gemini calls through the Helicone proxy.
+    # Leave empty to call Vertex AI directly (no observability).
+    HELICONE_API_KEY: str = os.getenv("HELICONE_API_KEY", "")
 
     @classmethod
     def validate(cls) -> None:

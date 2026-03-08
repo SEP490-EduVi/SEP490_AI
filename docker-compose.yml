@@ -66,6 +66,8 @@ services:
       GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+      # Helicone Observability (optional — leave empty to call Vertex AI directly)
+      HELICONE_API_KEY: ${HELICONE_API_KEY:-}
     volumes:
       - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
     dns:
@@ -93,6 +95,8 @@ services:
       # Google Cloud
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+      # Helicone Observability (optional — leave empty to call Vertex AI directly)
+      HELICONE_API_KEY: ${HELICONE_API_KEY:-}
     volumes:
       - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
     dns:

@@ -37,6 +37,16 @@ class Config:
     REQUEST_QUEUE: str = "lesson.analysis.requests"
     RESULT_QUEUE: str = "pipeline.results"
 
+    # ── Concurrency ────────────────────────────────────────────────────
+    # How many tasks can be processed concurrently in one container.
+    # Each task fires a long Gemini API call (~58s), so tune against your Vertex AI quota.
+    PREFETCH_COUNT: int = int(os.getenv("LESSON_PREFETCH_COUNT", "5"))
+
+    # ── Helicone Observability ─────────────────────────────────────────
+    # Set HELICONE_API_KEY to route all Gemini calls through the Helicone proxy.
+    # Leave empty to call Vertex AI directly (no observability).
+    HELICONE_API_KEY: str = os.getenv("HELICONE_API_KEY", "")
+
     # ── Temp directory for downloaded files ────────────────────────────
     TEMP_DIR: str = os.path.join(os.path.dirname(__file__), "temp_downloads")
 

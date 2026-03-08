@@ -10,10 +10,10 @@ Flow: merge concepts → batch Gemini calls → reassemble in order.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import time
-from typing import Callable, TypedDict
+from typing import Awaitable, Callable, TypedDict
 
 from google import genai
 from google.genai import types
@@ -22,11 +22,29 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(
-    vertexai=True,
-    project=Config.GOOGLE_CLOUD_PROJECT,
-    location=Config.VERTEX_AI_LOCATION,
-)
+def _make_client() -> genai.Client:
+    """Create a Gemini client, routing through Helicone proxy when configured."""
+    if Config.HELICONE_API_KEY:
+        return genai.Client(
+            vertexai=True,
+            project=Config.GOOGLE_CLOUD_PROJECT,
+            location=Config.VERTEX_AI_LOCATION,
+            http_options=types.HttpOptions(
+                base_url="https://gateway.helicone.ai",
+                headers={
+                    "Helicone-Auth": f"Bearer {Config.HELICONE_API_KEY}",
+                    "Helicone-Target-Url": f"https://{Config.VERTEX_AI_LOCATION}-aiplatform.googleapis.com",
+                },
+            ),
+        )
+    return genai.Client(
+        vertexai=True,
+        project=Config.GOOGLE_CLOUD_PROJECT,
+        location=Config.VERTEX_AI_LOCATION,
+    )
+
+
+_client = _make_client()
 
 # ── Constants ─────────────────────────────────────────────────────────
 
@@ -108,7 +126,7 @@ class SlideContext(TypedDict, total=False):
 
 
 # (slide_index, slide_title) — fired after each slide is generated
-OnSlideDone = Callable[[int, str], None]
+OnSlideDone = Callable[[int, str], Awaitable[None]]
 
 
 # ── Private helpers ───────────────────────────────────────────────────
@@ -224,7 +242,7 @@ def _build_batch_prompt(
     )
 
 
-def _call_gemini(prompt: str, batch_idx: int) -> list[dict]:
+async def _call_gemini(prompt: str, batch_idx: int) -> list[dict]:
     """
     Send a batch prompt to Gemini and return the parsed JSON array.
     Retries once on transient failures (network, quota, server error).
@@ -233,7 +251,7 @@ def _call_gemini(prompt: str, batch_idx: int) -> list[dict]:
 
     for attempt in range(1 + MAX_RETRIES):
         try:
-            response = _client.models.generate_content(
+            response = await _client.aio.models.generate_content(
                 model=Config.GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -259,7 +277,7 @@ def _call_gemini(prompt: str, batch_idx: int) -> list[dict]:
                     "Batch %d attempt %d failed (%s), retrying in %ds...",
                     batch_idx, attempt + 1, exc, RETRY_DELAY,
                 )
-                time.sleep(RETRY_DELAY)
+                await asyncio.sleep(RETRY_DELAY)
             else:
                 logger.error("Batch %d failed after %d attempts", batch_idx, attempt + 1)
 
@@ -271,7 +289,7 @@ def _call_gemini(prompt: str, batch_idx: int) -> list[dict]:
 # ── Public API ────────────────────────────────────────────────────────
 
 
-def generate_all_slide_content(
+async def generate_all_slide_content(
     slide_plan: list[dict],
     context: SlideContext,
     on_slide_done: OnSlideDone | None = None,
@@ -279,11 +297,13 @@ def generate_all_slide_content(
     """
     Generate Vietnamese content for every slide in the plan.
 
+    All batches are fired concurrently via asyncio.gather for maximum throughput.
+
     Args:
         slide_plan:    Slide plan from planner.py.
                        Each item: {"index", "templateType", "title", "focus", "conceptRefs"}
         context:       Lesson context built by pipeline.py (concepts, sections, metadata).
-        on_slide_done: Optional callback(slide_index, slide_title) for progress reporting.
+        on_slide_done: Optional async callback(slide_index, slide_title) for progress reporting.
 
     Returns:
         List in the same order as slide_plan.
@@ -298,17 +318,26 @@ def generate_all_slide_content(
         for i in range(0, len(slide_plan), BATCH_SIZE)
     ]
 
+    # Build all prompts upfront
+    prompts_and_meta = []
     for batch_idx, batch in enumerate(batches):
         batch_num = batch_idx + 1
         batch_indices = {s["index"] for s in batch}
-
-        logger.info(
-            "Generating content for slides %s (batch %d/%d)...",
-            sorted(batch_indices), batch_num, len(batches),
-        )
-
         prompt = _build_batch_prompt(batch, all_concepts, textbook_sections)
-        batch_results = _call_gemini(prompt, batch_num)
+        prompts_and_meta.append((batch_num, batch_indices, prompt))
+
+    logger.info("Firing %d content batches concurrently...", len(prompts_and_meta))
+
+    # Fire all batches concurrently
+    batch_outputs = await asyncio.gather(
+        *[_call_gemini(prompt, batch_num) for batch_num, _, prompt in prompts_and_meta],
+        return_exceptions=True,
+    )
+
+    for (batch_num, batch_indices, _), batch_results in zip(prompts_and_meta, batch_outputs):
+        if isinstance(batch_results, BaseException):
+            logger.error("Batch %d failed: %s", batch_num, batch_results)
+            raise batch_results
 
         for item in batch_results:
             idx = item.get("index")
@@ -322,7 +351,7 @@ def generate_all_slide_content(
                 continue
             results[idx] = item
             if on_slide_done:
-                on_slide_done(idx, item.get("title", ""))
+                await on_slide_done(idx, item.get("title", ""))
 
     # Reassemble in plan order.
     final = []

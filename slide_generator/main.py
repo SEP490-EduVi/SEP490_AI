@@ -1,6 +1,6 @@
 """
-Slide Generator Service — RabbitMQ Worker
-==========================================
+Slide Generator Service — Async RabbitMQ Worker
+=================================================
 Listens on the 'slide.generation.requests' queue for tasks from the
 ASP.NET backend. Processes each request (evaluation result + preferences)
 and publishes progress updates + the final IDocument cards to 'pipeline.results'.
@@ -9,6 +9,8 @@ The ASP.NET BackgroundService consumes the result and:
   1. Wraps the cards into a full IDocument (adds id, createdAt, updatedAt)
   2. Stores in Product.SlideDocument column
   3. Pushes to frontend via SignalR
+
+Uses aio-pika (async) so a single container can handle many concurrent tasks.
 
 Local testing (without RabbitMQ):
     python main.py --cli <path_to_test_input.json>
@@ -22,13 +24,13 @@ test_input.json format:
 }
 """
 
+import asyncio
 import json
 import logging
 import sys
 import io
 import traceback
-import time
-import pika
+import aio_pika
 from config import Config
 from pipeline import run
 from rabbitmq_utils import get_connection, declare_queues, publish_progress
@@ -48,111 +50,108 @@ logger = logging.getLogger(__name__)
 # ── RabbitMQ Consumer Mode ────────────────────────────────────────────
 
 
-def _on_message(channel, method, _properties, body):
+async def _on_message(
+    message: aio_pika.abc.AbstractIncomingMessage,
+    channel: aio_pika.abc.AbstractChannel,
+) -> None:
     """Handle an incoming slide generation task from RabbitMQ."""
-    message = {}
-    try:
-        message = json.loads(body)
-        task_id = message["taskId"]
-        user_id = message["userId"]
-        product_id = message.get("productId")
-
-        evaluation_result = message.get("evaluationResult", {})
-        lesson_plan_text = message.get("lessonPlanText", "")
-        textbook_sections = message.get("textbookSections", [])
-        preferences = message.get("preferences", {})
-
-        logger.info(
-            "Received task %s | slideRange=%s | lesson=%s",
-            task_id,
-            preferences.get("slideRange", "medium"),
-            evaluation_result.get("matched_lesson", {}).get("id", "unknown"),
-        )
-
-        # Publish "started"
-        publish_progress(
-            channel, task_id, user_id, product_id,
-            "processing", "started", 0,
-            detail="Task received, starting slide generation",
-        )
-
-        # Progress callback → publishes to RabbitMQ
-        def on_progress(step: str, progress: int, detail: str = "") -> None:
-            publish_progress(
-                channel, task_id, user_id, product_id,
-                "processing", step, progress, detail=detail,
-            )
-
-        # Run the pipeline
-        result = run(
-            evaluation_result=evaluation_result,
-            lesson_plan_text=lesson_plan_text,
-            textbook_sections=textbook_sections,
-            preferences=preferences,
-            on_progress=on_progress,
-        )
-
-        # Publish completed with the IDocument data
-        publish_progress(
-            channel, task_id, user_id, product_id,
-            "completed", "slides_completed", 100,
-            result=result,
-        )
-
-        logger.info("Task %s completed successfully (%d cards).", task_id, len(result.get("cards", [])))
-
-    except Exception as exc:
-        error_msg = traceback.format_exc()
-        logger.exception("Task %s failed.", message.get("taskId", "unknown"))
-
+    msg = {}
+    async with message.process():
         try:
-            publish_progress(
-                channel,
-                message.get("taskId", "unknown"),
-                message.get("userId", "unknown"),
-                message.get("productId"),
-                "failed", "error", 0,
-                error=str(exc),
-                detail=error_msg,
+            msg = json.loads(message.body)
+            task_id = msg["taskId"]
+            user_id = msg["userId"]
+            product_id = msg.get("productId")
+
+            evaluation_result = msg.get("evaluationResult", {})
+            lesson_plan_text = msg.get("lessonPlanText", "")
+            textbook_sections = msg.get("textbookSections", [])
+            preferences = msg.get("preferences", {})
+
+            logger.info(
+                "Received task %s | slideRange=%s | lesson=%s",
+                task_id,
+                preferences.get("slideRange", "medium"),
+                evaluation_result.get("matched_lesson", {}).get("id", "unknown"),
             )
-        except Exception:
-            logger.exception("Failed to publish error result.")
 
-    finally:
-        channel.basic_ack(delivery_tag=method.delivery_tag)
+            # Publish "started"
+            await publish_progress(
+                channel, task_id, user_id, product_id,
+                "processing", "started", 0,
+                detail="Task received, starting slide generation",
+            )
+
+            # Progress callback → publishes to RabbitMQ
+            async def on_progress(step: str, progress: int, detail: str = "") -> None:
+                await publish_progress(
+                    channel, task_id, user_id, product_id,
+                    "processing", step, progress, detail=detail,
+                )
+
+            # Run the pipeline
+            result = await run(
+                evaluation_result=evaluation_result,
+                lesson_plan_text=lesson_plan_text,
+                textbook_sections=textbook_sections,
+                preferences=preferences,
+                on_progress=on_progress,
+            )
+
+            # Publish completed with the IDocument data
+            await publish_progress(
+                channel, task_id, user_id, product_id,
+                "completed", "slides_completed", 100,
+                result=result,
+            )
+
+            logger.info("Task %s completed successfully (%d cards).", task_id, len(result.get("cards", [])))
+
+        except Exception as exc:
+            error_msg = traceback.format_exc()
+            logger.exception("Task %s failed.", msg.get("taskId", "unknown"))
+
+            try:
+                await publish_progress(
+                    channel,
+                    msg.get("taskId", "unknown"),
+                    msg.get("userId", "unknown"),
+                    msg.get("productId"),
+                    "failed", "error", 0,
+                    error=str(exc),
+                    detail=error_msg,
+                )
+            except Exception:
+                logger.exception("Failed to publish error result.")
 
 
-def start_consumer() -> None:
-    """Connect to RabbitMQ and start consuming forever."""
+async def start_consumer() -> None:
+    """Connect to RabbitMQ and start consuming forever (async)."""
     logger.info(
         "Connecting to RabbitMQ at %s:%s ...",
         Config.RABBITMQ_HOST, Config.RABBITMQ_PORT,
     )
 
-    while True:
-        try:
-            connection = get_connection()
-            channel = connection.channel()
-            declare_queues(channel)
+    connection = await get_connection()
+    channel = await connection.channel()
+    await channel.set_qos(prefetch_count=Config.PREFETCH_COUNT)
+    await declare_queues(channel)
 
-            channel.basic_qos(prefetch_count=1)
-            channel.basic_consume(
-                queue=Config.REQUEST_QUEUE,
-                on_message_callback=_on_message,
-            )
+    queue = await channel.declare_queue(Config.REQUEST_QUEUE, durable=True)
 
-            logger.info(
-                "Connected! Waiting for messages on '%s' ...",
-                Config.REQUEST_QUEUE,
-            )
-            channel.start_consuming()
+    logger.info(
+        "Connected! Waiting for messages on '%s' (prefetch=%d) ...",
+        Config.REQUEST_QUEUE, Config.PREFETCH_COUNT,
+    )
 
-        except pika.exceptions.AMQPConnectionError as exc:
-            logger.warning("RabbitMQ connection lost: %s. Reconnecting in 5s...", exc)
-            time.sleep(5)
-        except KeyboardInterrupt:
-            logger.info("Shutting down consumer.")
-            break
+    await queue.consume(lambda msg: _on_message(msg, channel))
+
+    # Run forever (aio_pika.connect_robust handles reconnections automatically)
+    try:
+        await asyncio.Future()
+    except asyncio.CancelledError:
+        logger.info("Shutting down consumer.")
+        await connection.close()
 
 
 # ── CLI Mode (for local testing without RabbitMQ) ─────────────────────
@@ -175,12 +174,12 @@ def cli_mode() -> None:
     with open(input_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    result = run(
+    result = asyncio.run(run(
         evaluation_result=data.get("evaluationResult", {}),
         lesson_plan_text=data.get("lessonPlanText", ""),
         textbook_sections=data.get("textbookSections", []),
         preferences=data.get("preferences", {}),
-    )
+    ))
 
     print("\n" + "=" * 60)
     print("SLIDE GENERATION RESULT")
@@ -200,4 +199,4 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "--cli":
         cli_mode()
     else:
-        start_consumer()
+        asyncio.run(start_consumer())

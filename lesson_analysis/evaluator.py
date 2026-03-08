@@ -11,11 +11,30 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(
-    vertexai=True,
-    project=Config.GOOGLE_CLOUD_PROJECT,
-    location=Config.VERTEX_AI_LOCATION,
-)
+
+def _make_client() -> genai.Client:
+    """Create a Gemini client, routing through Helicone proxy when configured."""
+    if Config.HELICONE_API_KEY:
+        return genai.Client(
+            vertexai=True,
+            project=Config.GOOGLE_CLOUD_PROJECT,
+            location=Config.VERTEX_AI_LOCATION,
+            http_options=types.HttpOptions(
+                base_url="https://gateway.helicone.ai",
+                headers={
+                    "Helicone-Auth": f"Bearer {Config.HELICONE_API_KEY}",
+                    "Helicone-Target-Url": f"https://{Config.VERTEX_AI_LOCATION}-aiplatform.googleapis.com",
+                },
+            ),
+        )
+    return genai.Client(
+        vertexai=True,
+        project=Config.GOOGLE_CLOUD_PROJECT,
+        location=Config.VERTEX_AI_LOCATION,
+    )
+
+
+_client = _make_client()
 
 
 # ── 1) Lesson identification ─────────────────────────────────────────────────
@@ -46,7 +65,7 @@ Return ONLY JSON, no markdown fences:
 """
 
 
-def identify_lesson(
+async def identify_lesson(
     lesson_text: str, available_lessons: list[dict]
 ) -> dict:
     """Use LLM to match the lesson plan text to a known lesson in Neo4j.
@@ -65,7 +84,7 @@ def identify_lesson(
         available_lessons=lessons_str,
     )
 
-    response = _client.models.generate_content(
+    response = await _client.aio.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
@@ -160,7 +179,7 @@ Return ONLY a JSON object. No markdown fences, no extra text.
 """
 
 
-def evaluate_lesson_plan(
+async def evaluate_lesson_plan(
     lesson_text: str,
     standard_concepts: list[dict],
     standard_locations: list[dict] | None = None,
@@ -188,7 +207,7 @@ def evaluate_lesson_plan(
         section_content=sections_str,
     )
 
-    response = _client.models.generate_content(
+    response = await _client.aio.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(

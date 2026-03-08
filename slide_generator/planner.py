@@ -18,11 +18,29 @@ from templates import ALL_TEMPLATE_TYPES
 
 logger = logging.getLogger(__name__)
 
-_client = genai.Client(
-    vertexai=True,
-    project=Config.GOOGLE_CLOUD_PROJECT,
-    location=Config.VERTEX_AI_LOCATION,
-)
+def _make_client() -> genai.Client:
+    """Create a Gemini client, routing through Helicone proxy when configured."""
+    if Config.HELICONE_API_KEY:
+        return genai.Client(
+            vertexai=True,
+            project=Config.GOOGLE_CLOUD_PROJECT,
+            location=Config.VERTEX_AI_LOCATION,
+            http_options=types.HttpOptions(
+                base_url="https://gateway.helicone.ai",
+                headers={
+                    "Helicone-Auth": f"Bearer {Config.HELICONE_API_KEY}",
+                    "Helicone-Target-Url": f"https://{Config.VERTEX_AI_LOCATION}-aiplatform.googleapis.com",
+                },
+            ),
+        )
+    return genai.Client(
+        vertexai=True,
+        project=Config.GOOGLE_CLOUD_PROJECT,
+        location=Config.VERTEX_AI_LOCATION,
+    )
+
+
+_client = _make_client()
 
 # ── Template descriptions for the planning prompt ─────────────────────
 
@@ -62,7 +80,7 @@ def _parse_json(raw: str) -> dict | list:
     return json.loads(cleaned)
 
 
-def plan_presentation(context: dict, slide_range: str) -> list[dict]:
+async def plan_presentation(context: dict, slide_range: str) -> list[dict]:
     """
     Call Gemini to produce a slide plan.
 
@@ -159,7 +177,7 @@ Trả về JSON array theo định dạng sau (CHỈ JSON, không có markdown):
     logger.info("Calling Gemini for slide planning (range: %s, %d-%d content + %d interactive)...",
                 slide_range, min_slides, max_slides, interactive_count)
 
-    response = _client.models.generate_content(
+    response = await _client.aio.models.generate_content(
         model=Config.GEMINI_MODEL,
         contents=user_prompt,
         config=types.GenerateContentConfig(
