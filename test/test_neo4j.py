@@ -1,5 +1,5 @@
 """
-Quick smoke test – verify Neo4j Aura is reachable and responding.
+Quick smoke test  verify Neo4j Aura is reachable and responding.
 
 Run from the project root:
     python test/test_neo4j.py
