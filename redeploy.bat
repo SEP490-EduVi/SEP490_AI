@@ -19,29 +19,29 @@ EXIT /B 1
 
 :deploy_lesson
 ECHO === Redeploying lesson-analysis ===
-docker-compose stop lesson-analysis
-docker-compose rm -f lesson-analysis
-docker-compose build --no-cache lesson-analysis
-docker-compose up -d lesson-analysis
-docker-compose logs -f lesson-analysis
+docker-compose -f docker-compose.dev.yml stop lesson-analysis
+docker-compose -f docker-compose.dev.yml rm -f lesson-analysis
+docker-compose -f docker-compose.dev.yml build --no-cache lesson-analysis
+docker-compose -f docker-compose.dev.yml up -d lesson-analysis
+docker-compose -f docker-compose.dev.yml logs -f lesson-analysis
 GOTO end
 
 :deploy_slide
 ECHO === Redeploying slide-generator ===
-docker-compose stop slide-generator
-docker-compose rm -f slide-generator
-docker-compose build --no-cache slide-generator
-docker-compose up -d slide-generator
-docker-compose logs -f slide-generator
+docker-compose -f docker-compose.dev.yml stop slide-generator
+docker-compose -f docker-compose.dev.yml rm -f slide-generator
+docker-compose -f docker-compose.dev.yml build --no-cache slide-generator
+docker-compose -f docker-compose.dev.yml up -d slide-generator
+docker-compose -f docker-compose.dev.yml logs -f slide-generator
 GOTO end
 
 :deploy_all
 ECHO === Redeploying all AI services ===
-docker-compose stop lesson-analysis slide-generator
-docker-compose rm -f lesson-analysis slide-generator
-docker-compose build --no-cache lesson-analysis slide-generator
-docker-compose up -d lesson-analysis slide-generator
-docker-compose logs -f lesson-analysis slide-generator
+docker-compose -f docker-compose.dev.yml stop lesson-analysis slide-generator
+docker-compose -f docker-compose.dev.yml rm -f lesson-analysis slide-generator
+docker-compose -f docker-compose.dev.yml build --no-cache lesson-analysis slide-generator
+docker-compose -f docker-compose.dev.yml up -d lesson-analysis slide-generator
+docker-compose -f docker-compose.dev.yml logs -f lesson-analysis slide-generator
 GOTO end
 
 :end
