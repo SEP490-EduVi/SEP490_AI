@@ -1,4 +1,4 @@
-# Gemini LLM via Vertex AI (new google-genai SDK)
+# Gemini LLM via Vertex AI 
 google-genai>=1.0.0
 
 # RabbitMQ (async)
