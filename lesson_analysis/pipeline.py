@@ -181,7 +181,7 @@ async def run(
                 "No standard concepts found — evaluation will still proceed."
             )
 
-        # ── Step 4: Evaluate via LLM ─────────────────────────────────
+        # ── Step 4: Evaluate via LLM ───────────────────────────────
         await _progress("evaluating", 70, "Evaluating lesson plan via Gemini...")
         evaluation = await evaluate_lesson_plan(
             raw_text,
