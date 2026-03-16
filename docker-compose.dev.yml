@@ -106,6 +106,41 @@ services:
     networks:
       - eduvi
 
+  # ── Video Generator Worker ───────────────────────────────────────────
+  # Scale for concurrent users: docker compose up --scale video-generator=3
+  video-generator:
+    build:
+      context: .
+      dockerfile: video_generator/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # RabbitMQ
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASS: guest
+      # Concurrency: how many videos this container processes at once.
+      # Recommended: keep at 1 (CPU/RAM bound). Scale replicas instead.
+      PREFETCH_COUNT: ${VIDEO_PREFETCH_COUNT:-1}
+      # Google Cloud
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+      VIDEO_GCS_BUCKET: ${VIDEO_GCS_BUCKET:-}
+      VIDEO_GCS_PREFIX: ${VIDEO_GCS_PREFIX:-generated_videos}
+      VIDEO_RETURN_GCS_URI: ${VIDEO_RETURN_GCS_URI:-true}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+    volumes:
+      - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
+      - ./videos:/app/videos
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+    networks:
+      - eduvi
+
   # ── Textbook Ingestion Worker ───────────────────────────────────────
   # textbook-ingestion:
   #   build:
