@@ -16,7 +16,7 @@ import tempfile
 import uuid
 import os
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Callable, Awaitable
 
 from .slide_renderer import render_slide_async, cleanup_browser
 from .tts import generate_audio_async
@@ -30,6 +30,24 @@ _BINARY_CACHE: Dict[str, str] = {}
 # Directory where finished videos are served from
 OUTPUT_DIR = Path(config.OUTPUT_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+ProgressCallback = Callable[[str, int, str | None], Awaitable[None] | None]
+
+
+async def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    step: str,
+    progress: int,
+    detail: str | None = None,
+) -> None:
+    """Emit progress via callback if provided."""
+    if not progress_callback:
+        return
+
+    maybe_awaitable = progress_callback(step, progress, detail)
+    if asyncio.iscoroutine(maybe_awaitable):
+        await maybe_awaitable
 
 
 def _build_gcs_uri(bucket: str, blob_name: str) -> str:
@@ -467,7 +485,11 @@ async def _get_video_duration(video_path: str) -> float:
         return 0.0
 
 
-async def generate_video_async(lesson_data: dict, request_id: str = None) -> dict:
+async def generate_video_async(
+    lesson_data: dict,
+    request_id: str = None,
+    progress_callback: ProgressCallback | None = None,
+) -> dict:
     """
     Async video generation pipeline.
     
@@ -483,6 +505,13 @@ async def generate_video_async(lesson_data: dict, request_id: str = None) -> dic
     logger.info("Pipeline started [%s] tmp=%s", request_id, tmp_dir)
 
     try:
+        await _emit_progress(
+            progress_callback,
+            step="extracting_cards",
+            progress=10,
+            detail="Resolving lesson payload",
+        )
+
         # Extract lesson data from API response format
         lesson = extract_lesson_data(lesson_data)
         cards = lesson.get("cards", [])
@@ -491,6 +520,12 @@ async def generate_video_async(lesson_data: dict, request_id: str = None) -> dic
             raise ValueError("No cards found in the input JSON.")
 
         logger.info("Processing %d card(s)...", len(cards))
+        await _emit_progress(
+            progress_callback,
+            step="rendering_slides",
+            progress=20,
+            detail=f"Rendering {len(cards)} slide(s)",
+        )
 
         # Process cards in bounded parallelism to protect worker resources.
         max_concurrency = max(1, int(getattr(config, "MAX_SLIDE_CONCURRENCY", 4)))
@@ -517,10 +552,27 @@ async def generate_video_async(lesson_data: dict, request_id: str = None) -> dic
             )
             for i, card in enumerate(cards)
         ]
-        processed_cards = await asyncio.gather(*tasks)
+
+        processed_cards: List[Dict[str, Any]] = []
+        total_cards = len(cards)
+        completed_cards = 0
+        for done in asyncio.as_completed(tasks):
+            item = await done
+            completed_cards += 1
+            if item and item.get("video_path"):
+                processed_cards.append(item)
+
+            render_progress = 20 + int((completed_cards / total_cards) * 50)
+            await _emit_progress(
+                progress_callback,
+                step="rendering_slides",
+                progress=min(render_progress, 70),
+                detail=f"Completed {completed_cards}/{total_cards} slide(s)",
+            )
         
-        # Filter out skipped cards and keep stable order.
+        # Filter out skipped cards and restore original slide order.
         processed_cards = [item for item in processed_cards if item and item.get("video_path")]
+        processed_cards.sort(key=lambda item: int(item.get("card_num") or 0))
         video_paths = [item["video_path"] for item in processed_cards]
         
         if not video_paths:
@@ -531,9 +583,21 @@ async def generate_video_async(lesson_data: dict, request_id: str = None) -> dic
         output_path = str(OUTPUT_DIR / output_filename)
         
         logger.info("Concatenating %d videos...", len(video_paths))
+        await _emit_progress(
+            progress_callback,
+            step="concatenating_video",
+            progress=80,
+            detail="Merging slide clips",
+        )
         await _concat_videos(video_paths, output_path)
 
         # Build timing map for FE pause/overlay interactions.
+        await _emit_progress(
+            progress_callback,
+            step="building_timeline",
+            progress=88,
+            detail="Calculating interaction timeline",
+        )
         clip_durations = await asyncio.gather(
             *[
                 _get_video_duration_limited(item["video_path"], probe_semaphore)
@@ -568,6 +632,12 @@ async def generate_video_async(lesson_data: dict, request_id: str = None) -> dic
 
         # Get final duration
         duration = await _get_video_duration(output_path)
+        await _emit_progress(
+            progress_callback,
+            step="uploading_video",
+            progress=95,
+            detail="Uploading output video",
+        )
 
         local_video_url = f"{config.VIDEO_BASE_URL}/{output_filename}"
         video_gcs_uri = _upload_video_to_gcs(output_path, request_id=request_id)
