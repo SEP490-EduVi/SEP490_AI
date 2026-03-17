@@ -39,7 +39,7 @@ VIDEO_BASE_URL = os.getenv("VIDEO_BASE_URL", "http://localhost:8000/videos")
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "")
 VIDEO_GCS_PREFIX = os.getenv("VIDEO_GCS_PREFIX", "generated_videos")
 
-# If true and VIDEO_GCS_BUCKET is configured, pipeline returns gs:// URI as video_url.
+# If true and GCS_BUCKET_NAME is configured, pipeline returns gs:// URI as video_url.
 VIDEO_RETURN_GCS_URI = (
 	os.getenv("VIDEO_RETURN_GCS_URI", "true").strip().lower() == "true"
 )

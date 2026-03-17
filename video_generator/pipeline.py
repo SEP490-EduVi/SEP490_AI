@@ -38,7 +38,7 @@ def _build_gcs_uri(bucket: str, blob_name: str) -> str:
 
 def _upload_video_to_gcs(local_path: str, request_id: str) -> str | None:
     """Upload local video to GCS and return gs:// URI."""
-    bucket_name = (getattr(config, "VIDEO_GCS_BUCKET", "") or "").strip()
+    bucket_name = (getattr(config, "GCS_BUCKET_NAME", "") or "").strip()
     if not bucket_name:
         return None
 
