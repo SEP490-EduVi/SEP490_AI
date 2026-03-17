@@ -60,36 +60,6 @@ async def publish_result(
                 config.RESULT_QUEUE, correlation_id)
 
 
-def _publish_progress(
-    channel,
-    task_id: str,
-    user_id: str,
-    product_id,
-    request_id: str | None,
-    status: str,
-    step: str,
-    progress: int,
-    correlation_id: str = None,
-    detail: str | None = None,
-    result: dict | None = None,
-    error: str | None = None,
-):
-    """Publish standard pipeline progress/result message."""
-    payload = {
-        "taskId": task_id,
-        "userId": user_id,
-        "productId": product_id,
-        "requestId": request_id,
-        "status": status,
-        "step": step,
-        "progress": progress,
-        "detail": detail,
-        "result": result,
-        "error": error,
-    }
-    publish_result(channel, payload, correlation_id)
-
-
 def _extract_lesson_payload(message: dict):
     """Extract lesson payload from direct JSON data or gs:// source URI."""
     direct_payload = (
@@ -207,16 +177,60 @@ async def _on_message(
                 detail="Task received, starting video generation",
             )
 
+            await _publish_progress(
+                channel,
+                task_id=task_id,
+                user_id=user_id,
+                product_id=product_id,
+                request_id=source_request_id,
+                status="processing",
+                step="loading_payload",
+                progress=5,
+                correlation_id=correlation_id,
+                detail="Loading lesson payload",
+            )
+
             # Load lesson payload (may be GCS URI or inline data)
             lesson_data = await asyncio.to_thread(
                 _extract_lesson_payload_sync, msg
             )
+
+            await _publish_progress(
+                channel,
+                task_id=task_id,
+                user_id=user_id,
+                product_id=product_id,
+                request_id=source_request_id,
+                status="processing",
+                step="validating_payload",
+                progress=8,
+                correlation_id=correlation_id,
+                detail="Validating lesson structure",
+            )
             _validate_cards_present(lesson_data)
+
+            async def _pipeline_progress(step: str, progress: int, detail: str | None = None) -> None:
+                await _publish_progress(
+                    channel,
+                    task_id=task_id,
+                    user_id=user_id,
+                    product_id=product_id,
+                    request_id=source_request_id,
+                    status="processing",
+                    step=step,
+                    progress=progress,
+                    correlation_id=correlation_id,
+                    detail=detail,
+                )
 
             # Run video pipeline in thread to avoid blocking event loop.
             # Each call gets its own Playwright browser (reset_browser_state
             # is called inside generate_video_async at start of each run).
-            result = await generate_video_async(lesson_data, request_id=task_id)
+            result = await generate_video_async(
+                lesson_data,
+                request_id=task_id,
+                progress_callback=_pipeline_progress,
+            )
 
             result_payload = {
                 "type": "video",
