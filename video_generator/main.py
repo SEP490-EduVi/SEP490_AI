@@ -149,6 +149,7 @@ async def _on_message(
 
     async with message.process(requeue=False):
         logger.info("Received message [%s] (%d bytes)", task_id, len(message.body))
+        last_processing_event: tuple[str, int, str | None] | None = None
 
         try:
             msg = json.loads(message.body.decode("utf-8"))
@@ -164,52 +165,14 @@ async def _on_message(
                 task_id, user_id, product_id, product_code,
             )
 
-            await _publish_progress(
-                channel,
-                task_id=task_id,
-                user_id=user_id,
-                product_id=product_id,
-                request_id=source_request_id,
-                status="processing",
-                step="started",
-                progress=0,
-                correlation_id=correlation_id,
-                detail="Task received, starting video generation",
-            )
+            async def _publish_processing(step: str, progress: int, detail: str | None = None) -> None:
+                nonlocal last_processing_event
+                event = (step, int(progress), detail)
+                if event == last_processing_event:
+                    logger.debug("Skip duplicate progress event task=%s event=%s", task_id, event)
+                    return
 
-            await _publish_progress(
-                channel,
-                task_id=task_id,
-                user_id=user_id,
-                product_id=product_id,
-                request_id=source_request_id,
-                status="processing",
-                step="loading_payload",
-                progress=5,
-                correlation_id=correlation_id,
-                detail="Loading lesson payload",
-            )
-
-            # Load lesson payload (may be GCS URI or inline data)
-            lesson_data = await asyncio.to_thread(
-                _extract_lesson_payload_sync, msg
-            )
-
-            await _publish_progress(
-                channel,
-                task_id=task_id,
-                user_id=user_id,
-                product_id=product_id,
-                request_id=source_request_id,
-                status="processing",
-                step="validating_payload",
-                progress=8,
-                correlation_id=correlation_id,
-                detail="Validating lesson structure",
-            )
-            _validate_cards_present(lesson_data)
-
-            async def _pipeline_progress(step: str, progress: int, detail: str | None = None) -> None:
+                last_processing_event = event
                 await _publish_progress(
                     channel,
                     task_id=task_id,
@@ -222,6 +185,33 @@ async def _on_message(
                     correlation_id=correlation_id,
                     detail=detail,
                 )
+
+            await _publish_processing(
+                step="started",
+                progress=0,
+                detail="Task received, starting video generation",
+            )
+
+            await _publish_processing(
+                step="loading_payload",
+                progress=5,
+                detail="Loading lesson payload",
+            )
+
+            # Load lesson payload (may be GCS URI or inline data)
+            lesson_data = await asyncio.to_thread(
+                _extract_lesson_payload_sync, msg
+            )
+
+            await _publish_processing(
+                step="validating_payload",
+                progress=8,
+                detail="Validating lesson structure",
+            )
+            _validate_cards_present(lesson_data)
+
+            async def _pipeline_progress(step: str, progress: int, detail: str | None = None) -> None:
+                await _publish_processing(step=step, progress=progress, detail=detail)
 
             # Run video pipeline in thread to avoid blocking event loop.
             # Each call gets its own Playwright browser (reset_browser_state
