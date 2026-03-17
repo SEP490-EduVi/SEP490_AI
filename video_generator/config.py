@@ -37,7 +37,6 @@ VIDEO_BASE_URL = os.getenv("VIDEO_BASE_URL", "http://localhost:8000/videos")
 
 # ── GCS Upload (optional, recommended for backend consumption) ───────────────
 GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "")
-VIDEO_GCS_BUCKET = (os.getenv("VIDEO_GCS_BUCKET", "") or GCS_BUCKET_NAME).strip()
 VIDEO_GCS_PREFIX = os.getenv("VIDEO_GCS_PREFIX", "generated_videos")
 
 # If true and VIDEO_GCS_BUCKET is configured, pipeline returns gs:// URI as video_url.
