@@ -151,7 +151,7 @@ async def start_consumer() -> None:
         await connection.close()
 
 
-# ── CLI Mode (for local testing without RabbitMQ) ─────────────────────
+# ── CLI Mode (for local testing without RabbitMQ) ─────
 
 
 def cli_mode() -> None:

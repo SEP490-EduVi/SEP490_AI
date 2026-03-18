@@ -41,9 +41,9 @@ docker-compose up -d lesson-analysis
 --------------------------------------------------------------
  7. REBUILD & RESTART ALL SERVICES
 --------------------------------------------------------------
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+docker compose down
+docker compose build --no-cache
+docker compose up -d
 
 --------------------------------------------------------------
  8. VIEW LOGS
