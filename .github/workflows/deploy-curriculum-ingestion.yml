@@ -6,6 +6,8 @@ on:
       - main
     paths:
       - "curriculum_ingestion/**"
+      - ".github/workflows/deploy-curriculum-ingestion.yml"
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
