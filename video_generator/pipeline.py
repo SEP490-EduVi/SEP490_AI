@@ -554,7 +554,7 @@ async def generate_video_async(
         probe_semaphore = asyncio.Semaphore(probe_concurrency)
 
         tasks = [
-            _process_card_limited(
+            asyncio.create_task(_process_card_limited(
                 card,
                 i + 1,
                 tmp_dir,
@@ -562,26 +562,34 @@ async def generate_video_async(
                 render_semaphore,
                 tts_semaphore,
                 ffmpeg_semaphore,
-            )
+            ))
             for i, card in enumerate(cards)
         ]
 
         processed_cards: List[Dict[str, Any]] = []
         total_cards = len(cards)
         completed_cards = 0
-        for done in asyncio.as_completed(tasks):
-            item = await done
-            completed_cards += 1
-            if item and item.get("video_path"):
-                processed_cards.append(item)
+        try:
+            for done in asyncio.as_completed(tasks):
+                item = await done
+                completed_cards += 1
+                if item and item.get("video_path"):
+                    processed_cards.append(item)
 
-            render_progress = 20 + int((completed_cards / total_cards) * 50)
-            await _emit_progress(
-                progress_callback,
-                step="rendering_slides",
-                progress=min(render_progress, 70),
-                detail=f"Completed {completed_cards}/{total_cards} slide(s)",
-            )
+                render_progress = 20 + int((completed_cards / total_cards) * 50)
+                await _emit_progress(
+                    progress_callback,
+                    step="rendering_slides",
+                    progress=min(render_progress, 70),
+                    detail=f"Completed {completed_cards}/{total_cards} slide(s)",
+                )
+        except Exception:
+            # Stop remaining slide tasks quickly so they do not continue after pipeline failure.
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
         
         # Filter out skipped cards and restore original slide order.
         processed_cards = [item for item in processed_cards if item and item.get("video_path")]

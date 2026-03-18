@@ -25,6 +25,10 @@ TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "4"))
 FFMPEG_CONCURRENCY = int(os.getenv("FFMPEG_CONCURRENCY", "1"))
 PROBE_CONCURRENCY = int(os.getenv("PROBE_CONCURRENCY", "2"))
 
+# Retry transient Edge TTS failures like NoAudioReceived.
+TTS_MAX_RETRIES = int(os.getenv("TTS_MAX_RETRIES", "3"))
+TTS_RETRY_DELAY_SEC = float(os.getenv("TTS_RETRY_DELAY_SEC", "0.8"))
+
 # Keep Playwright browser alive across requests for better throughput.
 CLEANUP_BROWSER_EACH_REQUEST = (
 	os.getenv("CLEANUP_BROWSER_EACH_REQUEST", "false").strip().lower() == "true"
