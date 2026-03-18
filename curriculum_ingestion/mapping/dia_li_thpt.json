@@ -1,0 +1,27 @@
+{
+  "_comment": "Maps Neo4j Lesson IDs (textbook schema) to ChuDe IDs (curriculum schema).",
+  "_comment2": "Fill this in after first ingestion run. Query ChuDe IDs with:",
+  "_comment3": "MATCH (l:Lop)-[:HAS]->(cd:ChuDe) WHERE l.id CONTAINS 'lop_10' RETURN cd.id, cd.ten_chu_de ORDER BY cd.id",
+  "_comment4": "One Lesson can COVER multiple ChuDe (array). Leave empty until mapping is known.",
+
+  "dia_li_lop_10_L1": [],
+  "dia_li_lop_10_L2": [],
+  "dia_li_lop_10_L3": [],
+  "dia_li_lop_10_L4": [],
+  "dia_li_lop_10_L5": [],
+  "dia_li_lop_10_L6": [],
+  "dia_li_lop_10_L7": [],
+  "dia_li_lop_10_L8": [],
+  "dia_li_lop_10_L9": [],
+  "dia_li_lop_10_L10": [],
+  "dia_li_lop_10_L11": [],
+  "dia_li_lop_10_L12": [],
+  "dia_li_lop_10_L13": [],
+  "dia_li_lop_10_L14": [],
+  "dia_li_lop_10_L15": [],
+  "dia_li_lop_10_L16": [],
+  "dia_li_lop_10_L17": [],
+  "dia_li_lop_10_L18": [],
+  "dia_li_lop_10_L19": [],
+  "dia_li_lop_10_L20": []
+}

@@ -97,6 +97,10 @@ services:
       GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
       # Helicone Observability (optional — leave empty to call Vertex AI directly)
       HELICONE_API_KEY: ${HELICONE_API_KEY:-}
+      # Neo4j (Aura — cloud hosted)
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
     volumes:
       - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
     dns:
@@ -168,6 +172,40 @@ services:
   #   restart: unless-stopped
   #   networks:
   #     - eduvi
+
+  # ── Curriculum Ingestion Worker ─────────────────────────────────────
+  curriculum-ingestion:
+    build:
+      context: ./curriculum_ingestion
+      dockerfile: Dockerfile
+    container_name: curriculum-ingestion
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # RabbitMQ
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      # Neo4j (Aura — cloud hosted, same instance as lesson-analysis)
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      # Google Cloud
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+      # Helicone Observability (optional)
+      HELICONE_API_KEY: ${HELICONE_API_KEY:-}
+    volumes:
+      - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+    networks:
+      - eduvi
 
   # ── Dozzle (Real-time Log Viewer) ───────────────────────────────────
   dozzle:

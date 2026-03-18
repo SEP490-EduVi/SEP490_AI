@@ -1,0 +1,7 @@
+aio-pika==9.4.3
+google-cloud-storage==2.19.0
+google-cloud-aiplatform==1.74.0
+google-genai==1.9.0
+neo4j==5.27.0
+python-docx==1.1.2
+python-dotenv==1.0.1

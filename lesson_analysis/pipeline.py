@@ -1,4 +1,4 @@
-"""Pipeline: Download → Extract → Fetch standard data → Evaluate (async)."""
+"""Pipeline: Download → Extract text → Fetch curriculum YeuCau → Evaluate (async)."""
 
 import asyncio
 import os
@@ -6,16 +6,8 @@ import logging
 from typing import Awaitable, Callable
 from gcs_handler import download_from_gcs
 from extractor import extract_text
-from neo4j_client import (
-    find_book,
-    list_lessons,
-    get_concepts_by_lesson_id,
-    get_locations_by_lesson_id,
-    get_sections_by_lesson_id,
-    get_standard_concepts,
-    get_standard_locations,
-)
-from evaluator import identify_lesson, evaluate_lesson_plan
+from neo4j_client import get_yeu_cau_by_lesson_id
+from evaluator import evaluate_lesson_plan
 
 logger = logging.getLogger(__name__)
 
@@ -57,33 +49,22 @@ async def run(
     gcs_uri: str,
     subject: str,
     grade: str,
-    lesson_id: str | None = None,
+    lesson_id: str,
+    curriculum_year: int | None = None,
     on_progress: ProgressCallback | None = None,
 ) -> dict:
     """
     Run the lesson-analysis pipeline (async).
 
-    Args:
-        gcs_uri:  GCS path to the lesson plan file.
-        subject:  Subject code (e.g. "dia_li").
-        grade:    Grade code (e.g. "lop_10").
-        lesson_id: Neo4j lesson ID (e.g. "dia_li_10_bai_1").
-                   If provided, skips LLM lesson identification.
-        on_progress: Optional async callback(step, progress, detail) for live updates.
+    lesson_id (lessonCode) is required — the backend always provides it.
+    curriculum_year is optional metadata, passed through to the result.
 
-    Flow (when lesson_id is provided):
+    Flow:
       1. Download file from GCS
       2. Extract text from PDF/DOCX
-      3. Fetch concepts/locations/sections for the lesson
-      4. Evaluate the lesson plan against the standard data
-
-    Flow (when lesson_id is NOT provided — fallback):
-      1. Download file from GCS
-      2. Extract text from PDF/DOCX
-      3. Find the book in Neo4j
-      4. Use LLM to identify which lesson the plan covers
-      5. Fetch concepts/locations/sections for that lesson
-      6. Evaluate the lesson plan against the standard data
+      3. Build full Neo4j lesson ID
+      4. Fetch YeuCau/ChuDe from curriculum graph (Lesson → COVERS → ChuDe → HAS → YeuCau)
+      5. Evaluate the lesson plan against curriculum standards via Gemini
     """
 
     async def _progress(step: str, progress: int, detail: str = "") -> None:
@@ -105,107 +86,51 @@ async def run(
             raise ValueError("No text could be extracted from %s" % gcs_uri)
         await _progress("extracting_text", 30, f"Extracted {len(raw_text)} characters")
 
-        # ── Step 3: Resolve lesson ────────────────────────────────────
-        if lesson_id:
-            # Build full Neo4j ID from parts if needed
-            # e.g. ("dia_li", "lop_10", "bai_1") → "dia_li_10_bai_1"
-            matched_id = _build_full_lesson_id(subject, grade, lesson_id)
-            if matched_id != lesson_id:
-                logger.info("Resolved lesson ID: %s → %s", lesson_id, matched_id)
+        # ── Step 3: Resolve lesson ID ─────────────────────────────────
+        matched_id = _build_full_lesson_id(subject, grade, lesson_id)
+        if matched_id != lesson_id:
+            logger.info("Resolved lesson ID: %s → %s", lesson_id, matched_id)
 
-            await _progress("fetching_data", 45, f"Fetching standard data for lesson {matched_id}")
-            matched_name = lesson_id  # Will be enriched from Neo4j data if available
-            confidence = "provided"
+        # ── Step 4: Fetch curriculum YeuCau/ChuDe ────────────────────
+        await _progress("fetching_data", 40, f"Fetching curriculum data for lesson {matched_id}...")
+        curriculum_data = await asyncio.to_thread(get_yeu_cau_by_lesson_id, matched_id)
+        yeu_cau_count = len(curriculum_data.get("yeu_cau_list", []))
+        chu_de_count = len(curriculum_data.get("chu_de_list", []))
 
-            standard_concepts, standard_locations, section_content = await asyncio.gather(
-                asyncio.to_thread(get_concepts_by_lesson_id, matched_id),
-                asyncio.to_thread(get_locations_by_lesson_id, matched_id),
-                asyncio.to_thread(get_sections_by_lesson_id, matched_id),
+        if not yeu_cau_count:
+            logger.warning(
+                "No YeuCau found for lesson %s — COVERS links may not be created yet. "
+                "Evaluation will proceed without curriculum standards.", matched_id,
             )
-
-        else:
-            # Fallback: use LLM to identify the lesson
-            await _progress("finding_book", 35, f"Finding book for {subject} - {grade}")
-            book = await asyncio.to_thread(find_book, subject, grade)
-            if not book:
-                raise ValueError(
-                    "No book found in Neo4j matching subject='%s', grade='%s'"
-                    % (subject, grade)
-                )
-
-            await _progress("identifying_lesson", 45, "Identifying lesson via LLM...")
-            available_lessons = await asyncio.to_thread(list_lessons, book["id"])
-            if not available_lessons:
-                raise ValueError(
-                    "No lessons found in Neo4j for book %s" % book["id"]
-                )
-
-            match_result = await identify_lesson(raw_text, available_lessons)
-            matched_id = match_result.get("matched_lesson_id")
-            matched_name = match_result.get("matched_lesson_name")
-            confidence = match_result.get("confidence", "unknown")
-
-            if not matched_id:
-                logger.warning(
-                    "LLM could not match a lesson. Falling back to whole-book data."
-                )
-
-            await _progress(
-                "identifying_lesson", 55,
-                f"Matched → {matched_name} (confidence: {confidence})"
-            )
-
-            # Fetch standard data
-            if matched_id:
-                standard_concepts, standard_locations, section_content = await asyncio.gather(
-                    asyncio.to_thread(get_concepts_by_lesson_id, matched_id),
-                    asyncio.to_thread(get_locations_by_lesson_id, matched_id),
-                    asyncio.to_thread(get_sections_by_lesson_id, matched_id),
-                )
-            else:
-                standard_concepts, standard_locations = await asyncio.gather(
-                    asyncio.to_thread(get_standard_concepts, book["subject"], book["grade"]),
-                    asyncio.to_thread(get_standard_locations, book["subject"], book["grade"]),
-                )
-                section_content = []
 
         await _progress(
-            "fetching_data", 60,
-            f"Loaded {len(standard_concepts)} concepts, "
-            f"{len(standard_locations)} locations, "
-            f"{len(section_content)} sections",
+            "fetching_data", 55,
+            f"Loaded {chu_de_count} chủ đề, {yeu_cau_count} yêu cầu cần đạt",
         )
 
-        if not standard_concepts:
-            logger.warning(
-                "No standard concepts found — evaluation will still proceed."
-            )
-
-        # ── Step 4: Evaluate via LLM ───────────────────────────────
-        await _progress("evaluating", 70, "Evaluating lesson plan via Gemini...")
+        # ── Step 5: Evaluate via Gemini ───────────────────────────────
+        await _progress("evaluating", 65, "Evaluating lesson plan via Gemini...")
         evaluation = await evaluate_lesson_plan(
             raw_text,
-            standard_concepts,
-            standard_locations,
-            matched_lesson_name=matched_name,
-            section_content=section_content,
+            curriculum_data,
+            matched_lesson_name=matched_id,
         )
 
-        await _progress("evaluating", 90, "Evaluation complete, assembling result...")
+        await _progress("evaluating", 95, "Evaluation complete, assembling result...")
 
-        # Assemble the final response
         result = {
             "lesson_plan_file": gcs_uri,
             "subject": subject,
             "grade": grade,
+            "curriculum_year": curriculum_year,
             "matched_lesson": {
                 "id": matched_id,
-                "name": matched_name,
-                "confidence": confidence,
+                "name": evaluation.get("detected_lesson_name", matched_id),
+                "confidence": "provided",
             },
+            "curriculum": curriculum_data,
             "evaluation": evaluation,
             "lesson_plan_text": raw_text,
-            "textbook_sections": section_content,
         }
 
         await _progress("completed", 100, "Pipeline finished successfully")

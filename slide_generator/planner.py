@@ -8,8 +8,10 @@ This output (a slide plan) is never shown to the teacher — it's an
 internal step that drives content_generator.py.
 """
 
+import asyncio
 import json
 import logging
+import random
 import re
 from google import genai
 from google.genai import types
@@ -21,15 +23,21 @@ logger = logging.getLogger(__name__)
 def _make_client() -> genai.Client:
     """Create a Gemini client, routing through Helicone proxy when configured."""
     if Config.HELICONE_API_KEY:
+        loc = Config.VERTEX_AI_LOCATION
+        target_host = (
+            "aiplatform.googleapis.com"
+            if loc == "global"
+            else f"{loc}-aiplatform.googleapis.com"
+        )
         return genai.Client(
             vertexai=True,
             project=Config.GOOGLE_CLOUD_PROJECT,
-            location=Config.VERTEX_AI_LOCATION,
+            location=loc,
             http_options=types.HttpOptions(
                 base_url="https://gateway.helicone.ai",
                 headers={
                     "Helicone-Auth": f"Bearer {Config.HELICONE_API_KEY}",
-                    "Helicone-Target-Url": f"https://{Config.VERTEX_AI_LOCATION}-aiplatform.googleapis.com",
+                    "Helicone-Target-Url": f"https://{target_host}",
                 },
             ),
         )
@@ -90,9 +98,9 @@ async def plan_presentation(context: dict, slide_range: str) -> list[dict]:
             - subject (str)
             - grade (str)
             - objectives (list[str])
-            - covered_concepts (list[{name, explanation}])
-            - missing_concepts (list[{name, definition, importance}])
-            - textbook_key_topics (list[{name, source}])
+            - covered_yeu_cau (list[{noi_dung, how}])
+            - missing_yeu_cau (list[{noi_dung, tieu_chuan, importance}])
+            - chu_de_list (list[{id, ten_chu_de, phan_mon}])
             - activities (list[str])
             - textbook_sections (list[{heading, content}])  ← truncated summary
         slide_range: "short" | "medium" | "detailed"
@@ -121,11 +129,22 @@ async def plan_presentation(context: dict, slide_range: str) -> list[dict]:
             textbook_summary = textbook_summary[:2000] + "\n...(rút gọn)\n"
             break
 
-    covered = context.get("covered_concepts", [])
-    missing = context.get("missing_concepts", [])
-    topics = context.get("textbook_key_topics", [])
+    covered_yeu_cau = context.get("covered_yeu_cau", [])
+    missing_yeu_cau = context.get("missing_yeu_cau", [])
+    chu_de_list = context.get("chu_de_list", [])
     objectives = context.get("objectives", [])
     activities = context.get("activities", [])
+
+    # Pre-compute JSON strings — dict literals inside f-string expressions cause
+    # "unhashable type: dict" because {{...}} is parsed as a set, not escaped braces.
+    covered_json = json.dumps(
+        [{"noi_dung": yc.get("noi_dung"), "how": yc.get("how")} for yc in covered_yeu_cau],
+        ensure_ascii=False, indent=2,
+    )
+    missing_json = json.dumps(
+        [{"noi_dung": yc.get("noi_dung"), "tieu_chuan": yc.get("tieu_chuan"), "importance": yc.get("importance")} for yc in missing_yeu_cau],
+        ensure_ascii=False, indent=2,
+    )
 
     user_prompt = f"""
 Thông tin bài học:
@@ -135,14 +154,14 @@ Thông tin bài học:
 Mục tiêu bài học:
 {json.dumps(objectives, ensure_ascii=False, indent=2)}
 
-Chủ đề chính từ SGK:
-{json.dumps([t.get("name") for t in topics], ensure_ascii=False, indent=2)}
+Chủ đề trong chương trình:
+{json.dumps([cd.get("ten_chu_de") for cd in chu_de_list], ensure_ascii=False, indent=2)}
 
-Khái niệm đã phủ trong giáo án:
-{json.dumps([c.get("name") for c in covered], ensure_ascii=False, indent=2)}
+Yêu cầu cần đạt đã phủ trong giáo án:
+{covered_json}
 
-Khái niệm còn thiếu (quan trọng cần bổ sung):
-{json.dumps([{"name": c.get("name"), "importance": c.get("importance")} for c in missing], ensure_ascii=False, indent=2)}
+Yêu cầu cần đạt còn thiếu (quan trọng cần bổ sung):
+{missing_json}
 
 Hoạt động dạy học:
 {json.dumps(activities, ensure_ascii=False, indent=2)}
@@ -177,15 +196,54 @@ Trả về JSON array theo định dạng sau (CHỈ JSON, không có markdown):
     logger.info("Calling Gemini for slide planning (range: %s, %d-%d content + %d interactive)...",
                 slide_range, min_slides, max_slides, interactive_count)
 
-    response = await _client.aio.models.generate_content(
-        model=Config.GEMINI_MODEL,
-        contents=user_prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=_SYSTEM_PROMPT,
-            temperature=0.0,
-            response_mime_type="application/json",
-        ),
-    )
+    _PLANNER_TIMEOUT = 120   # seconds before a hung planner call is cancelled
+    _PLANNER_BASE_DELAY = 10  # base backoff seconds (doubles each attempt: 10s, 20s, 40s)
+    _PLANNER_RETRY_CAP = 60   # max backoff ceiling in seconds
+
+    last_error = None
+    for attempt in range(4):  # up to 4 attempts
+        try:
+            response = await asyncio.wait_for(
+                _client.aio.models.generate_content(
+                    model=Config.GEMINI_MODEL,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=_SYSTEM_PROMPT,
+                        temperature=0.0,
+                        response_mime_type="application/json",
+                    ),
+                ),
+                timeout=_PLANNER_TIMEOUT,
+            )
+            last_error = None
+            break
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            if attempt < 3:
+                ceiling = min(_PLANNER_BASE_DELAY * (2 ** attempt), _PLANNER_RETRY_CAP)
+                wait = random.uniform(0, ceiling)
+                logger.warning(
+                    "Planner attempt %d timed out after %ds, retrying in %.1fs...",
+                    attempt + 1, _PLANNER_TIMEOUT, wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                raise
+        except Exception as exc:
+            last_error = exc
+            if attempt < 3:
+                ceiling = min(_PLANNER_BASE_DELAY * (2 ** attempt), _PLANNER_RETRY_CAP)
+                wait = random.uniform(0, ceiling)
+                logger.warning(
+                    "Planner attempt %d failed (%s), retrying in %.1fs...",
+                    attempt + 1, exc, wait,
+                )
+                await asyncio.sleep(wait)
+            else:
+                raise
+
+    if last_error:
+        raise last_error
 
     raw = response.text
     logger.debug("Planner raw response: %s", raw[:500])

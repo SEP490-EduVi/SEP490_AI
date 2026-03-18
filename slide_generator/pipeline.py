@@ -6,12 +6,14 @@ Phase 2 (internal): content_generator.py — Gemini generates content per slide
 Phase 3 (Python):   assembler.py  — builds IDocument JSON from plan + content
 """
 
+import asyncio
 import logging
 from typing import Awaitable, Callable
 
 from planner import plan_presentation
 from content_generator import generate_all_slide_content
 from assembler import assemble_document
+import neo4j_client
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,6 @@ ProgressCallback = Callable[[str, int, str], Awaitable[None]]
 async def run(
     evaluation_result: dict,
     lesson_plan_text: str,
-    textbook_sections: list[dict],
     preferences: dict,
     on_progress: ProgressCallback | None = None,
 ) -> dict:
@@ -33,7 +34,6 @@ async def run(
         evaluation_result: The full evaluation dict from Service 2
                            (stored in Product.EvaluationResult SQL column)
         lesson_plan_text:  Extracted text from the teacher's lesson plan file
-        textbook_sections: list of {heading, content} from Neo4j
         preferences:       dict with "slideRange": "short" | "medium" | "detailed"
         on_progress:       async callback(step, progress, detail) for RabbitMQ progress messages
 
@@ -51,7 +51,9 @@ async def run(
 
     evaluation = evaluation_result.get("evaluation", {})
     matched_lesson = evaluation_result.get("matched_lesson", {})
+    curriculum = evaluation_result.get("curriculum", {})
 
+    lesson_id = matched_lesson.get("id", "")
     lesson_name = (
         evaluation.get("detected_lesson_name")
         or matched_lesson.get("name")
@@ -64,6 +66,20 @@ async def run(
         grade = grade[4:]
     slide_range = preferences.get("slideRange", "medium")
 
+    # ── Fetch textbook content from Neo4j ─────────────────────────────
+
+    await _progress("fetching_data", 5, "Đang lấy nội dung sách giáo khoa từ Neo4j...")
+
+    textbook_sections, concepts = await asyncio.gather(
+        asyncio.to_thread(neo4j_client.get_sections_by_lesson_id, lesson_id),
+        asyncio.to_thread(neo4j_client.get_concepts_by_lesson_id, lesson_id),
+    )
+
+    logger.info(
+        "Neo4j fetch complete: %d sections, %d concepts for lesson %s",
+        len(textbook_sections), len(concepts), lesson_id,
+    )
+
     # ── Build context dict for Gemini calls ───────────────────────────
 
     context = {
@@ -71,10 +87,11 @@ async def run(
         "subject": subject,
         "grade": grade,
         "objectives": evaluation.get("objectives", []),
-        "covered_concepts": evaluation.get("covered_concepts", []),
-        "missing_concepts": evaluation.get("missing_concepts", []),
-        "textbook_key_topics": evaluation.get("textbook_key_topics", []),
+        "covered_yeu_cau": evaluation.get("covered_yeu_cau", []),
+        "missing_yeu_cau": evaluation.get("missing_yeu_cau", []),
+        "chu_de_list": curriculum.get("chu_de_list", []),
         "activities": evaluation.get("activities", []),
+        "concepts": concepts,
         "textbook_sections": textbook_sections,
         "lesson_plan_text": lesson_plan_text,
     }

@@ -1,8 +1,12 @@
-"""Fetch standard concepts from Neo4j knowledge graph.
+"""Neo4j queries for lesson analysis.
 
-Schema (created by textbook_ingestion):
+Textbook schema (created by textbook_ingestion):
     Book → Part → Chapter → Lesson → Section → Concept / Location / Figure
     Lessons may sit directly under Part (no Chapter).
+
+Curriculum schema (created by curriculum_ingestion):
+    MonHoc → Lop → ChuDe → YeuCau
+    Cross-schema: (Lesson)-[:COVERS]->(ChuDe)
 """
 
 import logging
@@ -153,6 +157,56 @@ def get_sections_by_lesson_id(lesson_id: str) -> list[dict]:
         sections = [{"heading": r["heading"], "content": r["content"]} for r in results]
     logger.info("Found %d sections for lesson %s", len(sections), lesson_id)
     return sections
+
+
+# ── Curriculum YeuCau ─────────────────────────────────────────────────────────
+
+
+def get_yeu_cau_by_lesson_id(lesson_id: str) -> dict:
+    """
+    Fetch curriculum YeuCau/ChuDe linked to a lesson via COVERS relationships.
+    Traverses: (Lesson)-[:COVERS]->(ChuDe)-[:MENTIONS]->(YeuCau)
+
+    Returns:
+        {
+            "chu_de_list": [{"id", "ten_chu_de", "phan_mon"}, ...],
+            "yeu_cau_list": [{"id", "noi_dung", "tieu_chuan", "chu_de_id"}, ...],
+        }
+    """
+    query = """
+    MATCH (l:Lesson {id: $lesson_id})-[:COVERS]->(cd:ChuDe)-[:MENTIONS]->(yc:YeuCau)
+    RETURN cd.id AS chu_de_id, cd.ten_chu_de AS ten_chu_de, cd.phan_mon AS phan_mon,
+           yc.id AS yeu_cau_id, yc.noi_dung AS noi_dung, yc.tieu_chuan AS tieu_chuan
+    ORDER BY cd.id, yc.id
+    """
+    with _driver.session() as session:
+        records = [dict(r) for r in session.run(query, lesson_id=lesson_id)]
+
+    chu_de_map: dict = {}
+    yeu_cau_list: list = []
+    for r in records:
+        cd_id = r["chu_de_id"]
+        if cd_id not in chu_de_map:
+            chu_de_map[cd_id] = {
+                "id": cd_id,
+                "ten_chu_de": r["ten_chu_de"],
+                "phan_mon": r["phan_mon"],
+            }
+        yeu_cau_list.append({
+            "id": r["yeu_cau_id"],
+            "noi_dung": r["noi_dung"],
+            "tieu_chuan": r["tieu_chuan"],
+            "chu_de_id": cd_id,
+        })
+
+    logger.info(
+        "Found %d YeuCau across %d ChuDe for lesson %s",
+        len(yeu_cau_list), len(chu_de_map), lesson_id,
+    )
+    return {
+        "chu_de_list": list(chu_de_map.values()),
+        "yeu_cau_list": yeu_cau_list,
+    }
 
 
 def close():

@@ -17,9 +17,8 @@ Local testing (without RabbitMQ):
 
 test_input.json format:
 {
-  "evaluationResult": { ... },
+  "evaluationResult": { "matched_lesson": {"id": "dia_li_lop_10_L1"}, "evaluation": {}, "curriculum": {} },
   "lessonPlanText": "...",
-  "textbookSections": [{"heading": "...", "content": "..."}],
   "preferences": {"slideRange": "medium"}
 }
 """
@@ -65,7 +64,6 @@ async def _on_message(
 
             evaluation_result = msg.get("evaluationResult", {})
             lesson_plan_text = msg.get("lessonPlanText", "")
-            textbook_sections = msg.get("textbookSections", [])
             preferences = msg.get("preferences", {})
 
             logger.info(
@@ -93,7 +91,6 @@ async def _on_message(
             result = await run(
                 evaluation_result=evaluation_result,
                 lesson_plan_text=lesson_plan_text,
-                textbook_sections=textbook_sections,
                 preferences=preferences,
                 on_progress=on_progress,
             )
@@ -118,7 +115,7 @@ async def _on_message(
                     msg.get("userId", "unknown"),
                     msg.get("productId"),
                     "failed", "error", 0,
-                    error=str(exc),
+                    error=f"{type(exc).__name__}: {exc}",
                     detail=error_msg,
                 )
             except Exception:
@@ -163,9 +160,8 @@ def cli_mode() -> None:
         print("Usage: python main.py --cli <path_to_test_input.json>")
         print("\ntest_input.json format:")
         print(json.dumps({
-            "evaluationResult": {"subject": "dia_li", "grade": "10", "evaluation": {}},
+            "evaluationResult": {"matched_lesson": {"id": "dia_li_lop_10_L1"}, "subject": "dia_li", "grade": "10", "evaluation": {}, "curriculum": {}},
             "lessonPlanText": "...",
-            "textbookSections": [{"heading": "...", "content": "..."}],
             "preferences": {"slideRange": "medium"},
         }, ensure_ascii=False, indent=2))
         sys.exit(1)
@@ -177,7 +173,6 @@ def cli_mode() -> None:
     result = asyncio.run(run(
         evaluation_result=data.get("evaluationResult", {}),
         lesson_plan_text=data.get("lessonPlanText", ""),
-        textbook_sections=data.get("textbookSections", []),
         preferences=data.get("preferences", {}),
     ))
 

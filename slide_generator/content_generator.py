@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from typing import Awaitable, Callable, TypedDict
 
 from google import genai
@@ -25,15 +26,21 @@ logger = logging.getLogger(__name__)
 def _make_client() -> genai.Client:
     """Create a Gemini client, routing through Helicone proxy when configured."""
     if Config.HELICONE_API_KEY:
+        loc = Config.VERTEX_AI_LOCATION
+        target_host = (
+            "aiplatform.googleapis.com"
+            if loc == "global"
+            else f"{loc}-aiplatform.googleapis.com"
+        )
         return genai.Client(
             vertexai=True,
             project=Config.GOOGLE_CLOUD_PROJECT,
-            location=Config.VERTEX_AI_LOCATION,
+            location=loc,
             http_options=types.HttpOptions(
                 base_url="https://gateway.helicone.ai",
                 headers={
                     "Helicone-Auth": f"Bearer {Config.HELICONE_API_KEY}",
-                    "Helicone-Target-Url": f"https://{Config.VERTEX_AI_LOCATION}-aiplatform.googleapis.com",
+                    "Helicone-Target-Url": f"https://{target_host}",
                 },
             ),
         )
@@ -48,11 +55,17 @@ _client = _make_client()
 
 # ── Constants ─────────────────────────────────────────────────────────
 
-BATCH_SIZE = 3          # slides per Gemini call
-MAX_RETRIES = 1         # retry once on transient Gemini failures
-RETRY_DELAY = 2         # seconds between retries
+BATCH_SIZE = 5          # slides per Gemini call
+MAX_RETRIES = 3         # retry up to 3 times on transient Gemini failures (429, 5xx)
+RETRY_BASE_DELAY = 5    # base seconds for exponential backoff (doubles each attempt)
+RETRY_CAP = 60          # maximum backoff ceiling in seconds
+CALL_TIMEOUT = 90       # seconds before a hung Gemini call is cancelled and retried
 MAX_SECTION_CHARS = 600 # max chars per textbook section injected into prompt
 MAX_RELEVANT_SECTIONS = 3  # max textbook sections per batch
+
+# Limits concurrent Gemini calls to avoid saturating Vertex AI quota.
+# 3 concurrent requests is safe for standard quota tiers.
+_GEMINI_SEMAPHORE = asyncio.Semaphore(3)
 
 # Role + output constraints for Gemini.
 # Vietnamese: K-12 slide content expert. Write concise Vietnamese. Return JSON only.
@@ -71,7 +84,7 @@ Tạo nội dung cho {slide_count} slide sau:
 
 {slides_spec}
 
-Khái niệm liên quan (từ sách giáo khoa):
+Khái niệm và yêu cầu cần đạt liên quan:
 {concepts_json}
 
 Nội dung SGK liên quan:
@@ -116,11 +129,12 @@ class SlideContext(TypedDict, total=False):
     lesson_name: str        # display name, e.g. "Bài 1: Bản đồ"
     subject: str            # e.g. "dia_li"
     grade: str              # e.g. "10"
-    covered_concepts: list[dict]   # [{"name", "definition"}]
-    missing_concepts: list[dict]   # [{"name", "definition"} or {"name", "explanation"}]
+    covered_yeu_cau: list[dict]    # [{"noi_dung", "how"}]
+    missing_yeu_cau: list[dict]    # [{"noi_dung", "tieu_chuan", "importance"}]
+    chu_de_list: list[dict]        # [{"id", "ten_chu_de", "phan_mon"}]
+    concepts: list[dict]           # [{"name", "definition"}] from Neo4j
     textbook_sections: list[dict]  # [{"heading", "content"}] from Neo4j
     objectives: list[str]
-    textbook_key_topics: list[str]
     activities: list[dict]
     lesson_plan_text: str
 
@@ -134,21 +148,24 @@ OnSlideDone = Callable[[int, str], Awaitable[None]]
 
 def _merge_concepts(context: SlideContext) -> list[dict]:
     """
-    Combine covered + missing concepts into one list.
-    Normalises missing concepts: "explanation" key → "definition" to match covered shape.
+    Combine textbook concepts + curriculum YeuCau into one flat concept list
+    usable by the Gemini prompt. Each item has {name, definition}.
     """
-    covered = context.get("covered_concepts", [])
-    missing = context.get("missing_concepts", [])
+    result: list[dict] = []
 
-    normalised_missing = [
-        {
-            "name": c.get("name", ""),
-            "definition": c.get("definition") or c.get("explanation", ""),
-        }
-        for c in missing
-    ]
+    # Textbook concepts from Neo4j
+    for co in context.get("concepts", []):
+        result.append({"name": co.get("name", ""), "definition": co.get("definition", "")})
 
-    return covered + normalised_missing
+    # Covered YeuCau: noi_dung as name, how teacher addressed it as definition
+    for yc in context.get("covered_yeu_cau", []):
+        result.append({"name": yc.get("noi_dung", ""), "definition": yc.get("how", "")})
+
+    # Missing YeuCau: noi_dung as name, tieu_chuan as definition
+    for yc in context.get("missing_yeu_cau", []):
+        result.append({"name": yc.get("noi_dung", ""), "definition": yc.get("tieu_chuan", "")})
+
+    return result
 
 
 def _find_relevant_sections(
@@ -251,14 +268,17 @@ async def _call_gemini(prompt: str, batch_idx: int) -> list[dict]:
 
     for attempt in range(1 + MAX_RETRIES):
         try:
-            response = await _client.aio.models.generate_content(
-                model=Config.GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_PROMPT,
-                    temperature=0.3,  # slightly creative for natural language, unlike planner's 0
-                    response_mime_type="application/json",
+            response = await asyncio.wait_for(
+                _client.aio.models.generate_content(
+                    model=Config.GEMINI_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=_SYSTEM_PROMPT,
+                        temperature=0.3,  # slightly creative for natural language, unlike planner's 0
+                        response_mime_type="application/json",
+                    ),
                 ),
+                timeout=CALL_TIMEOUT,
             )
 
             raw = response.text
@@ -270,14 +290,30 @@ async def _call_gemini(prompt: str, batch_idx: int) -> list[dict]:
 
             return parsed
 
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            if attempt < MAX_RETRIES:
+                ceiling = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_CAP)
+                delay = random.uniform(0, ceiling)
+                logger.warning(
+                    "Batch %d attempt %d timed out after %ds, retrying in %.1fs...",
+                    batch_idx, attempt + 1, CALL_TIMEOUT, delay,
+                )
+                await asyncio.sleep(delay)
+            else:
+                logger.error("Batch %d timed out after %d attempts", batch_idx, attempt + 1)
         except Exception as exc:
             last_error = exc
             if attempt < MAX_RETRIES:
+                # Exponential backoff with full jitter to spread retries:
+                # delay = random(0, min(base * 2^attempt, cap))
+                ceiling = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_CAP)
+                delay = random.uniform(0, ceiling)
                 logger.warning(
-                    "Batch %d attempt %d failed (%s), retrying in %ds...",
-                    batch_idx, attempt + 1, exc, RETRY_DELAY,
+                    "Batch %d attempt %d failed (%s), retrying in %.1fs...",
+                    batch_idx, attempt + 1, exc, delay,
                 )
-                await asyncio.sleep(RETRY_DELAY)
+                await asyncio.sleep(delay)
             else:
                 logger.error("Batch %d failed after %d attempts", batch_idx, attempt + 1)
 
@@ -326,11 +362,18 @@ async def generate_all_slide_content(
         prompt = _build_batch_prompt(batch, all_concepts, textbook_sections)
         prompts_and_meta.append((batch_num, batch_indices, prompt))
 
-    logger.info("Firing %d content batches concurrently...", len(prompts_and_meta))
+    logger.info(
+        "Firing %d content batches concurrently (max %d at a time)...",
+        len(prompts_and_meta), _GEMINI_SEMAPHORE._value,
+    )
 
-    # Fire all batches concurrently
+    async def _call_with_semaphore(prompt: str, batch_num: int) -> list[dict]:
+        async with _GEMINI_SEMAPHORE:
+            return await _call_gemini(prompt, batch_num)
+
+    # Fire all batches concurrently, throttled by _GEMINI_SEMAPHORE
     batch_outputs = await asyncio.gather(
-        *[_call_gemini(prompt, batch_num) for batch_num, _, prompt in prompts_and_meta],
+        *[_call_with_semaphore(prompt, batch_num) for batch_num, _, prompt in prompts_and_meta],
         return_exceptions=True,
     )
 

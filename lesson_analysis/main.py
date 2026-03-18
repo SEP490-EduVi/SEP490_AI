@@ -55,7 +55,11 @@ async def _on_message(
             gcs_uri = msg["gcsUri"]
             subject = msg.get("subjectCode", "")
             grade = msg.get("gradeCode", "")
-            lesson_id = msg.get("lessonCode")  # Neo4j lesson ID, e.g. "dia_li_10_bai_1"
+            lesson_id = msg.get("lessonCode")
+            curriculum_year = msg.get("curriculumYear")
+
+            if not lesson_id:
+                raise ValueError("Missing required field 'lessonCode' in message")
 
             logger.info(
                 "Received task %s | lesson=%s | gcs=%s",
@@ -82,6 +86,7 @@ async def _on_message(
                 subject=subject,
                 grade=grade,
                 lesson_id=lesson_id,
+                curriculum_year=curriculum_year,
                 on_progress=on_progress,
             )
 
@@ -106,7 +111,7 @@ async def _on_message(
                     msg.get("userId", "unknown"),
                     msg.get("productId"),
                     "failed", "error", 0,
-                    error=str(exc),
+                    error=f"{type(exc).__name__}: {exc}",
                     detail=error_msg,
                 )
             except Exception:

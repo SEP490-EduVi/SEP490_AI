@@ -6,5 +6,8 @@ aio-pika>=9.4.0
 
 # LLM Observability — Helicone proxy (no extra package; set HELICONE_API_KEY env var)
 
+# Neo4j
+neo4j>=5.0.0
+
 # Shared
 python-dotenv==1.0.1
