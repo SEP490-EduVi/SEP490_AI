@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 
 import aio_pika
 
@@ -28,6 +29,33 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger("video_generator")
+
+
+_PROGRESS_DEDUP_WINDOW_SEC = float(getattr(config, "PROGRESS_DEDUP_WINDOW_SEC", 2.0))
+_recent_progress_events: dict[tuple, float] = {}
+_recent_progress_events_lock = asyncio.Lock()
+
+
+async def _is_duplicate_progress_event(signature: tuple) -> bool:
+    """Return True when same progress event was published very recently."""
+    now = time.monotonic()
+    async with _recent_progress_events_lock:
+        # Periodic lightweight cleanup to keep memory bounded.
+        if _recent_progress_events:
+            expired = [
+                key
+                for key, ts in _recent_progress_events.items()
+                if (now - ts) > (_PROGRESS_DEDUP_WINDOW_SEC * 2)
+            ]
+            for key in expired:
+                _recent_progress_events.pop(key, None)
+
+        last_ts = _recent_progress_events.get(signature)
+        if last_ts is not None and (now - last_ts) <= _PROGRESS_DEDUP_WINDOW_SEC:
+            return True
+
+        _recent_progress_events[signature] = now
+        return False
 
 
 async def get_connection() -> aio_pika.abc.AbstractRobustConnection:
@@ -121,6 +149,34 @@ async def _publish_progress(
     error: str | None = None,
 ) -> None:
     """Publish standard pipeline progress/result message."""
+    result_signature = None
+    if result is not None:
+        try:
+            result_signature = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            result_signature = str(result)
+
+    event_signature = (
+        task_id,
+        user_id,
+        product_id,
+        request_id,
+        status,
+        step,
+        int(progress),
+        detail,
+        error,
+        result_signature,
+    )
+    if await _is_duplicate_progress_event(event_signature):
+        logger.warning(
+            "Suppressed duplicate progress event task=%s step=%s progress=%s",
+            task_id,
+            step,
+            progress,
+        )
+        return
+
     payload = {
         "taskId": task_id,
         "userId": user_id,
@@ -214,8 +270,6 @@ async def _on_message(
                 await _publish_processing(step=step, progress=progress, detail=detail)
 
             # Run video pipeline in thread to avoid blocking event loop.
-            # Each call gets its own Playwright browser (reset_browser_state
-            # is called inside generate_video_async at start of each run).
             result = await generate_video_async(
                 lesson_data,
                 request_id=task_id,

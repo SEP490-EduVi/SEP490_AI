@@ -15,7 +15,6 @@ RESULT_QUEUE = "pipeline.results"
 
 # ── Worker Settings ───────────────────────────────────────────────────────────
 PREFETCH_COUNT = int(os.getenv("PREFETCH_COUNT", "1"))
-RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "5"))
 
 # Limit slide-level concurrency per job to avoid CPU/RAM spikes.
 MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "4"))

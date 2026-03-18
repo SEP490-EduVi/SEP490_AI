@@ -192,11 +192,24 @@ def _extract_interaction_payload(card: Dict[str, Any]) -> Dict[str, Any] | None:
             for opt in q.get("options", []):
                 options.append((opt.get("text", "") if isinstance(opt, dict) else str(opt)).strip())
 
+            cleaned_options = [o for o in options if o]
+            correct_index_raw = q.get("correctIndex")
+            try:
+                correct_index = int(correct_index_raw)
+            except (TypeError, ValueError):
+                correct_index = None
+
+            correct_answer = None
+            if correct_index is not None and 0 <= correct_index < len(cleaned_options):
+                correct_answer = cleaned_options[correct_index]
+
             return {
                 "type": "quiz",
                 "title": card_title,
                 "question": str(q.get("question") or "").strip(),
-                "options": [o for o in options if o],
+                "options": cleaned_options,
+                "correctIndex": correct_index,
+                "correctAnswer": correct_answer,
             }
 
         if content_type == "FLASHCARD":
