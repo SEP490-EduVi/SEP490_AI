@@ -841,13 +841,14 @@ async def generate_video_async(
             progress=88,
             detail="Calculating interaction timeline",
         )
+        video_items = [item for item in processed_cards if item.get("video_path")]
         clip_durations = await asyncio.gather(
             *[
                 _get_video_duration_limited(item["video_path"], probe_semaphore)
-                for item in processed_cards
+                for item in video_items
             ]
         )
-        for item, clip_duration in zip(processed_cards, clip_durations):
+        for item, clip_duration in zip(video_items, clip_durations):
             item["clip_duration"] = clip_duration
 
         timeline_cursor = 0.0
