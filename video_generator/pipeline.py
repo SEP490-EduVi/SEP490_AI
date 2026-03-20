@@ -608,25 +608,18 @@ async def _process_card(
     material_video = _extract_video_material(card)
     if material_video:
         video_path = str(tmp_dir / f"slide_{card_num}.mp4")
-        try:
-            async with ffmpeg_semaphore:
-                await _create_video_clip_from_material(
-                    source_video=material_video["src"],
-                    output_path=video_path,
-                    start_time=material_video.get("start_time"),
-                    end_time=material_video.get("end_time"),
-                )
-            return {
-                "card_num": card_num,
-                "video_path": video_path,
-                "interaction": interaction,
-            }
-        except Exception:
-            logger.warning(
-                "Card %d material video could not be converted, fallback to normal render flow",
-                card_num,
-                exc_info=True,
+        async with ffmpeg_semaphore:
+            await _create_video_clip_from_material(
+                source_video=material_video["src"],
+                output_path=video_path,
+                start_time=material_video.get("start_time"),
+                end_time=material_video.get("end_time"),
             )
+        return {
+            "card_num": card_num,
+            "video_path": video_path,
+            "interaction": interaction,
+        }
 
     # Get narration text
     narration = _extract_narration_from_card(card)
@@ -854,6 +847,7 @@ async def generate_video_async(
         timeline_cursor = 0.0
         interactions: List[Dict[str, Any]] = []
         pause_points: List[float] = []
+        interaction_index_by_base_pause: Dict[float, int] = {}
         for slide_index, item in enumerate(processed_cards, start=1):
             clip_duration = float(item.get("clip_duration") or 0.0)
             start_time = timeline_cursor
@@ -863,7 +857,12 @@ async def generate_video_async(
 
             interaction = item.get("interaction")
             if interaction:
-                pause_time = round(end_time, 3)
+                base_pause_time = round(end_time, 3)
+                same_time_index = interaction_index_by_base_pause.get(base_pause_time, 0)
+                interaction_index_by_base_pause[base_pause_time] = same_time_index + 1
+
+                # Avoid identical pause times when multiple interactive cards are consecutive.
+                pause_time = round(base_pause_time + (same_time_index * 0.001), 3)
                 interactions.append({
                     "type": interaction["type"],
                     "slide_index": slide_index,
