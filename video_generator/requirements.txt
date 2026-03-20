@@ -3,3 +3,4 @@ playwright>=1.40.0
 beautifulsoup4==4.12.3
 aio-pika>=9.4.0
 google-cloud-storage>=2.18.0
+yt-dlp>=2025.2.19

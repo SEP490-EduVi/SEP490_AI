@@ -17,6 +17,7 @@ import uuid
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Awaitable
+from urllib.parse import urlparse
 
 from .slide_renderer import render_slide_async, cleanup_browser
 from .tts import generate_audio_async
@@ -441,12 +442,13 @@ async def _create_video_clip_from_material(
 ) -> str:
     """Create a normalized MP4 clip from source video material."""
     ffmpeg = _get_ffmpeg()
+    resolved_source = await _resolve_material_source_for_ffmpeg(source_video)
 
     cmd = [ffmpeg, "-y"]
     if start_time is not None and start_time >= 0:
         cmd.extend(["-ss", str(start_time)])
 
-    cmd.extend(["-i", source_video])
+    cmd.extend(["-i", resolved_source])
 
     if (
         start_time is not None
@@ -477,6 +479,66 @@ async def _create_video_clip_from_material(
 
     logger.info("Created video clip from material: %s", Path(output_path).name)
     return output_path
+
+
+def _is_youtube_url(value: str) -> bool:
+    try:
+        host = (urlparse(value).netloc or "").lower()
+    except Exception:
+        return False
+    return (
+        "youtube.com" in host
+        or "youtu.be" in host
+        or "m.youtube.com" in host
+    )
+
+
+def _resolve_youtube_stream_url_sync(source_video: str) -> str:
+    """Resolve a YouTube page URL into a direct media stream URL."""
+    try:
+        import yt_dlp
+    except Exception as exc:
+        raise RuntimeError(
+            "yt-dlp is required to process YouTube material URLs"
+        ) from exc
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(source_video, download=False)
+        if isinstance(info, dict) and info.get("entries"):
+            entries = info.get("entries") or []
+            info = entries[0] if entries else info
+
+        if isinstance(info, dict):
+            direct = info.get("url")
+            if isinstance(direct, str) and direct.strip():
+                return direct.strip()
+
+            for f in info.get("formats") or []:
+                candidate = f.get("url")
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+
+    raise RuntimeError("Could not resolve direct stream URL from YouTube material")
+
+
+async def _resolve_material_source_for_ffmpeg(source_video: str) -> str:
+    """Return an ffmpeg-compatible source for material video input."""
+    source = str(source_video or "").strip()
+    if not source:
+        raise RuntimeError("Empty material video source")
+
+    if _is_youtube_url(source):
+        logger.info("Resolving YouTube material URL for ffmpeg input")
+        return await asyncio.to_thread(_resolve_youtube_stream_url_sync, source)
+
+    return source
 
 
 async def _concat_videos(video_paths: List[str], output_path: str) -> str:
@@ -546,18 +608,25 @@ async def _process_card(
     material_video = _extract_video_material(card)
     if material_video:
         video_path = str(tmp_dir / f"slide_{card_num}.mp4")
-        async with ffmpeg_semaphore:
-            await _create_video_clip_from_material(
-                source_video=material_video["src"],
-                output_path=video_path,
-                start_time=material_video.get("start_time"),
-                end_time=material_video.get("end_time"),
+        try:
+            async with ffmpeg_semaphore:
+                await _create_video_clip_from_material(
+                    source_video=material_video["src"],
+                    output_path=video_path,
+                    start_time=material_video.get("start_time"),
+                    end_time=material_video.get("end_time"),
+                )
+            return {
+                "card_num": card_num,
+                "video_path": video_path,
+                "interaction": interaction,
+            }
+        except Exception:
+            logger.warning(
+                "Card %d material video could not be converted, fallback to normal render flow",
+                card_num,
+                exc_info=True,
             )
-        return {
-            "card_num": card_num,
-            "video_path": video_path,
-            "interaction": interaction,
-        }
 
     # Get narration text
     narration = _extract_narration_from_card(card)
