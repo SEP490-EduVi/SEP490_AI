@@ -214,11 +214,15 @@ def _extract_interaction_payload(card: Dict[str, Any]) -> Dict[str, Any] | None:
 
         if content_type == "FLASHCARD":
             front = ""
+            back = ""
             cards = content.get("cards") or []
             if isinstance(cards, list) and cards:
                 front = str((cards[0] or {}).get("front") or "").strip()
+                back = str((cards[0] or {}).get("back") or "").strip()
             if not front:
                 front = str(content.get("front") or "").strip()
+            if not back:
+                back = str(content.get("back") or "").strip()
             if not front:
                 return None
 
@@ -226,6 +230,31 @@ def _extract_interaction_payload(card: Dict[str, Any]) -> Dict[str, Any] | None:
                 "type": "flashcard",
                 "title": card_title,
                 "front": front,
+                "back": back,
+            }
+
+        if content_type == "FILL_BLANK":
+            sentence = str(content.get("sentence") or "").strip()
+            blanks = content.get("blanks") or []
+            hint = str(content.get("hint") or "").strip()
+
+            # Support schema where FILL_BLANK keeps data under exercises[].
+            if (not sentence or not blanks) and isinstance(content.get("exercises"), list):
+                ex = (content.get("exercises") or [{}])[0] or {}
+                sentence = sentence or str(ex.get("sentence") or "").strip()
+                blanks = blanks or (ex.get("blanks") or [])
+                hint = hint or str(ex.get("hint") or "").strip()
+
+            if not sentence:
+                return None
+
+            clean_blanks = [str(b).strip() for b in blanks if str(b).strip()]
+            return {
+                "type": "fill_blank",
+                "title": card_title,
+                "sentence": sentence,
+                "blanks": clean_blanks,
+                "hint": hint,
             }
 
     return None
@@ -303,17 +332,67 @@ def _extract_text_recursive(node: Dict[str, Any], parts: List[str]):
                         parts.append(back)
 
         elif content_type == "FILL_BLANK":
-            sentence = (content.get("sentence") or "").strip()
-            if sentence:
-                # Replace [blank] markers with spoken placeholder.
-                spoken = re.sub(r"\[.*?\]", "chỗ trống", sentence)
-                parts.append(spoken)
+            exercises = content.get("exercises") or []
+            if isinstance(exercises, list) and exercises:
+                for ex in exercises:
+                    sentence = str((ex or {}).get("sentence") or "").strip()
+                    if sentence:
+                        spoken = re.sub(r"\[.*?\]", "chỗ trống", sentence)
+                        parts.append(spoken)
 
-            blanks = content.get("blanks") or []
-            for b in blanks:
-                blank_text = str(b).strip()
-                if blank_text:
-                    parts.append(blank_text)
+                    blanks = (ex or {}).get("blanks") or []
+                    for b in blanks:
+                        blank_text = str(b).strip()
+                        if blank_text:
+                            parts.append(blank_text)
+            else:
+                sentence = (content.get("sentence") or "").strip()
+                if sentence:
+                    # Replace [blank] markers with spoken placeholder.
+                    spoken = re.sub(r"\[.*?\]", "chỗ trống", sentence)
+                    parts.append(spoken)
+
+                blanks = content.get("blanks") or []
+                for b in blanks:
+                    blank_text = str(b).strip()
+                    if blank_text:
+                        parts.append(blank_text)
+
+
+def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Extract source video info from a VIDEO block if present."""
+    for content in _iter_block_contents(card.get("children", [])):
+        if (content.get("type") or "").upper() != "VIDEO":
+            continue
+
+        material = content.get("material") if isinstance(content.get("material"), dict) else {}
+        src = (
+            content.get("src")
+            or content.get("videoUrl")
+            or content.get("url")
+            or content.get("assetUrl")
+            or material.get("url")
+            or material.get("src")
+        )
+        src = str(src).strip() if src else ""
+        if not src:
+            continue
+
+        def _as_float(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        start_time = _as_float(content.get("startTime") or content.get("start"))
+        end_time = _as_float(content.get("endTime") or content.get("end"))
+
+        return {
+            "src": src,
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+    return None
 
 
 async def _create_slide_video(
@@ -351,6 +430,52 @@ async def _create_slide_video(
         raise RuntimeError(f"ffmpeg failed: {stderr.decode()}")
     
     logger.info("Created slide video: %s", Path(output_path).name)
+    return output_path
+
+
+async def _create_video_clip_from_material(
+    source_video: str,
+    output_path: str,
+    start_time: float | None = None,
+    end_time: float | None = None,
+) -> str:
+    """Create a normalized MP4 clip from source video material."""
+    ffmpeg = _get_ffmpeg()
+
+    cmd = [ffmpeg, "-y"]
+    if start_time is not None and start_time >= 0:
+        cmd.extend(["-ss", str(start_time)])
+
+    cmd.extend(["-i", source_video])
+
+    if (
+        start_time is not None
+        and end_time is not None
+        and end_time > start_time
+    ):
+        cmd.extend(["-t", str(end_time - start_time)])
+
+    cmd.extend([
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-movflags", "+faststart",
+        "-loglevel", "error",
+        output_path,
+    ])
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg material video failed: {stderr.decode()}")
+
+    logger.info("Created video clip from material: %s", Path(output_path).name)
     return output_path
 
 
@@ -408,13 +533,41 @@ async def _process_card(
     Process a single CARD: screenshot + TTS + create video.
     Returns processed clip metadata.
     """
+    interaction = _extract_interaction_payload(card)
+
+    if interaction and interaction.get("type") in {"quiz", "flashcard", "fill_blank"}:
+        # Interactive cards are handled by FE via pause/interactions, not rendered into video.
+        return {
+            "card_num": card_num,
+            "video_path": None,
+            "interaction": interaction,
+        }
+
+    material_video = _extract_video_material(card)
+    if material_video:
+        video_path = str(tmp_dir / f"slide_{card_num}.mp4")
+        async with ffmpeg_semaphore:
+            await _create_video_clip_from_material(
+                source_video=material_video["src"],
+                output_path=video_path,
+                start_time=material_video.get("start_time"),
+                end_time=material_video.get("end_time"),
+            )
+        return {
+            "card_num": card_num,
+            "video_path": video_path,
+            "interaction": interaction,
+        }
+
     # Get narration text
     narration = _extract_narration_from_card(card)
     if not narration.strip():
         logger.warning("Card %d has no text, skipping", card_num)
-        return None
-
-    interaction = _extract_interaction_payload(card)
+        return {
+            "card_num": card_num,
+            "video_path": None,
+            "interaction": interaction,
+        }
     
     # Paths
     image_path = str(tmp_dir / f"slide_{card_num}.png")
@@ -573,7 +726,7 @@ async def generate_video_async(
             for done in asyncio.as_completed(tasks):
                 item = await done
                 completed_cards += 1
-                if item and item.get("video_path"):
+                if item:
                     processed_cards.append(item)
 
                 render_progress = 20 + int((completed_cards / total_cards) * 50)
@@ -592,9 +745,9 @@ async def generate_video_async(
             raise
         
         # Filter out skipped cards and restore original slide order.
-        processed_cards = [item for item in processed_cards if item and item.get("video_path")]
+        processed_cards = [item for item in processed_cards if item]
         processed_cards.sort(key=lambda item: int(item.get("card_num") or 0))
-        video_paths = [item["video_path"] for item in processed_cards]
+        video_paths = [item["video_path"] for item in processed_cards if item.get("video_path")]
         
         if not video_paths:
             raise ValueError("No valid slides to render.")
@@ -635,7 +788,8 @@ async def generate_video_async(
             clip_duration = float(item.get("clip_duration") or 0.0)
             start_time = timeline_cursor
             end_time = start_time + clip_duration
-            timeline_cursor = end_time
+            if clip_duration > 0:
+                timeline_cursor = end_time
 
             interaction = item.get("interaction")
             if interaction:
