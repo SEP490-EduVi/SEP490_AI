@@ -362,20 +362,51 @@ def _extract_text_recursive(node: Dict[str, Any], parts: List[str]):
 
 def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
     """Extract source video info from a VIDEO block if present."""
+    def _pick_video_url(*values: Any) -> str:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _extract_video_url_from_html_fragment(html_fragment: Any) -> str:
+        if not isinstance(html_fragment, str) or not html_fragment.strip():
+            return ""
+
+        # Detect common iframe/video URLs embedded in HTML blocks.
+        patterns = [
+            r"https?://(?:www\.)?youtube\.com/embed/[^\s\"'<>]+",
+            r"https?://(?:www\.)?youtube\.com/watch\?[^\s\"'<>]+",
+            r"https?://youtu\.be/[^\s\"'<>]+",
+            r"https?://[^\s\"'<>]+\.m3u8(?:\?[^\s\"'<>]*)?",
+            r"https?://[^\s\"'<>]+\.mp4(?:\?[^\s\"'<>]*)?",
+        ]
+        for pattern in patterns:
+            hit = re.search(pattern, html_fragment, flags=re.IGNORECASE)
+            if hit:
+                return hit.group(0)
+        return ""
+
     for content in _iter_block_contents(card.get("children", [])):
         if (content.get("type") or "").upper() != "VIDEO":
             continue
 
         material = content.get("material") if isinstance(content.get("material"), dict) else {}
-        src = (
-            content.get("src")
-            or content.get("videoUrl")
-            or content.get("url")
-            or content.get("assetUrl")
-            or material.get("url")
-            or material.get("src")
+        src = _pick_video_url(
+            content.get("src"),
+            content.get("videoUrl"),
+            content.get("url"),
+            content.get("assetUrl"),
+            content.get("embedUrl"),
+            content.get("youtubeUrl"),
+            content.get("sourceUrl"),
+            material.get("url"),
+            material.get("src"),
+            material.get("videoUrl"),
+            material.get("embedUrl"),
+            material.get("youtubeUrl"),
+            _extract_video_url_from_html_fragment(content.get("renderHtml")),
+            _extract_video_url_from_html_fragment(content.get("html")),
         )
-        src = str(src).strip() if src else ""
         if not src:
             continue
 
@@ -393,6 +424,20 @@ def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
             "start_time": start_time,
             "end_time": end_time,
         }
+
+    # Fallback: detect embedded video URL directly from card-level HTML payload.
+    src = _pick_video_url(
+        _extract_video_url_from_html_fragment(card.get("renderedHtml")),
+        _extract_video_url_from_html_fragment(card.get("renderHtml")),
+        _extract_video_url_from_html_fragment(card.get("html")),
+    )
+    if src:
+        return {
+            "src": src,
+            "start_time": None,
+            "end_time": None,
+        }
+
     return None
 
 
