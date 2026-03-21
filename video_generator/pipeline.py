@@ -363,10 +363,32 @@ def _extract_text_recursive(node: Dict[str, Any], parts: List[str]):
 
 def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
     """Extract source video info from a VIDEO block if present."""
+    def _normalize_candidate_url(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+
+        normalized = (
+            unescape(value)
+            .replace("\\u0026", "&")
+            .replace("\\/", "/")
+            .strip()
+        )
+        if not normalized:
+            return ""
+
+        if normalized.startswith("//"):
+            return f"https:{normalized}"
+
+        if normalized.startswith(("http://", "https://", "gs://", "file://", "/")):
+            return normalized
+
+        return ""
+
     def _pick_video_url(*values: Any) -> str:
         for value in values:
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+            candidate = _normalize_candidate_url(value)
+            if candidate:
+                return candidate
         return ""
 
     def _extract_video_url_from_html_fragment(html_fragment: Any) -> str:
@@ -381,6 +403,8 @@ def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
 
         # Detect common iframe/video URLs embedded in HTML blocks.
         patterns = [
+            r"<(?:iframe|video|source)\\b[^>]*\\bsrc\\s*=\\s*[\"']([^\"']+)[\"']",
+            r"<(?:iframe|video|source)\\b[^>]*\\bdata-src\\s*=\\s*[\"']([^\"']+)[\"']",
             r"https?://(?:www\.)?youtube\.com/embed/[^\s\"'<>]+",
             r"https?://(?:www\.)?youtube\.com/watch\?[^\s\"'<>]+",
             r"https?://(?:www\.)?youtube\.com/shorts/[^\s\"'<>]+",
@@ -388,12 +412,54 @@ def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
             r"https?://youtu\.be/[^\s\"'<>]+",
             r"https?://[^\s\"'<>]+\.m3u8(?:\?[^\s\"'<>]*)?",
             r"https?://[^\s\"'<>]+\.mp4(?:\?[^\s\"'<>]*)?",
+            r"//(?:www\.)?youtube\.com/embed/[^\s\"'<>]+",
+            r"//(?:www\.)?youtube-nocookie\.com/embed/[^\s\"'<>]+",
+            r"//[^\s\"'<>]+\.m3u8(?:\?[^\s\"'<>]*)?",
+            r"//[^\s\"'<>]+\.mp4(?:\?[^\s\"'<>]*)?",
         ]
         for pattern in patterns:
             hit = re.search(pattern, normalized_html, flags=re.IGNORECASE)
             if hit:
-                return hit.group(0)
+                return _normalize_candidate_url(hit.group(1) if hit.lastindex else hit.group(0))
         return ""
+
+    def _collect_candidate_urls(payload: Any) -> List[str]:
+        """Recursively collect possible video URLs from nested payload structures."""
+        candidates: List[str] = []
+
+        if isinstance(payload, dict):
+            candidate_keys = {
+                "src",
+                "url",
+                "videoUrl",
+                "assetUrl",
+                "embedUrl",
+                "youtubeUrl",
+                "sourceUrl",
+                "streamUrl",
+                "playUrl",
+                "downloadUrl",
+                "hlsUrl",
+                "fileUrl",
+            }
+            for key, value in payload.items():
+                if key in candidate_keys:
+                    url = _normalize_candidate_url(value)
+                    if url:
+                        candidates.append(url)
+
+                if isinstance(value, (dict, list, tuple)):
+                    candidates.extend(_collect_candidate_urls(value))
+                elif isinstance(value, str) and any(marker in value.casefold() for marker in ("<iframe", "<video", "<source", "youtube", ".mp4", ".m3u8")):
+                    from_html = _extract_video_url_from_html_fragment(value)
+                    if from_html:
+                        candidates.append(from_html)
+
+        elif isinstance(payload, (list, tuple)):
+            for item in payload:
+                candidates.extend(_collect_candidate_urls(item))
+
+        return candidates
 
     for content in _iter_block_contents(card.get("children", [])):
         if (content.get("type") or "").upper() != "VIDEO":
@@ -415,6 +481,7 @@ def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
             material.get("youtubeUrl"),
             _extract_video_url_from_html_fragment(content.get("renderHtml")),
             _extract_video_url_from_html_fragment(content.get("html")),
+            *_collect_candidate_urls(content),
         )
         if not src:
             continue
@@ -432,6 +499,15 @@ def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
             "src": src,
             "start_time": start_time,
             "end_time": end_time,
+        }
+
+    # Some payloads do not mark content.type as VIDEO but still provide playable URL metadata.
+    loose_candidates = _collect_candidate_urls(card)
+    if loose_candidates:
+        return {
+            "src": loose_candidates[0],
+            "start_time": None,
+            "end_time": None,
         }
 
     # Fallback: detect embedded video URL directly from card-level HTML payload.
@@ -563,6 +639,11 @@ def _card_has_video_intent(card: Dict[str, Any]) -> bool:
     if _extract_video_material(card):
         return True
 
+    # Explicit VIDEO blocks should never silently downgrade to screenshot.
+    for content in _iter_block_contents(card.get("children", [])):
+        if (content.get("type") or "").upper() == "VIDEO":
+            return True
+
     def _looks_like_video_text(value: Any) -> bool:
         if not isinstance(value, str) or not value.strip():
             return False
@@ -618,8 +699,38 @@ def _resolve_youtube_stream_url_sync(source_video: str) -> str:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "format": "bestvideo+bestaudio/best",
     }
+
+    def _is_storyboard_or_image(fmt: Dict[str, Any]) -> bool:
+        note = str(fmt.get("format_note") or "").casefold()
+        ext = str(fmt.get("ext") or "").casefold()
+        protocol = str(fmt.get("protocol") or "").casefold()
+        fmt_id = str(fmt.get("format_id") or "").casefold()
+
+        if "storyboard" in note:
+            return True
+        if ext in {"mhtml", "jpg", "jpeg", "png", "webp", "gif"}:
+            return True
+        if "mhtml" in protocol or "images" in protocol:
+            return True
+        if fmt_id.startswith("sb"):
+            return True
+        return False
+
+    def _is_video_format(fmt: Dict[str, Any]) -> bool:
+        if _is_storyboard_or_image(fmt):
+            return False
+        vcodec = str(fmt.get("vcodec") or "none").casefold()
+        return vcodec != "none"
+
+    def _format_score(fmt: Dict[str, Any]) -> tuple:
+        height = int(fmt.get("height") or 0)
+        fps = int(fmt.get("fps") or 0)
+        tbr = float(fmt.get("tbr") or 0.0)
+        prefers_mp4 = 1 if str(fmt.get("ext") or "").casefold() == "mp4" else 0
+        has_audio = 1 if str(fmt.get("acodec") or "none").casefold() != "none" else 0
+        return (height, fps, tbr, prefers_mp4, has_audio)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(source_video, download=False)
@@ -628,10 +739,32 @@ def _resolve_youtube_stream_url_sync(source_video: str) -> str:
             info = entries[0] if entries else info
 
         if isinstance(info, dict):
+            # yt-dlp usually puts selected formats here when format=... resolves cleanly.
+            requested = info.get("requested_formats")
+            if isinstance(requested, list) and requested:
+                candidates = [f for f in requested if isinstance(f, dict) and _is_video_format(f)]
+                if candidates:
+                    best = max(candidates, key=_format_score)
+                    direct = best.get("url")
+                    if isinstance(direct, str) and direct.strip():
+                        return direct.strip()
+
             direct = info.get("url")
             if isinstance(direct, str) and direct.strip():
                 return direct.strip()
 
+            video_formats = [
+                f
+                for f in (info.get("formats") or [])
+                if isinstance(f, dict) and _is_video_format(f)
+            ]
+            if video_formats:
+                best = max(video_formats, key=_format_score)
+                candidate = best.get("url")
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+
+            # Final fallback if metadata is atypical.
             for f in info.get("formats") or []:
                 candidate = f.get("url")
                 if isinstance(candidate, str) and candidate.strip():
