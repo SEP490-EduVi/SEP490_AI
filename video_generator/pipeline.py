@@ -547,11 +547,17 @@ async def _create_slide_video(
     cmd = [
         ffmpeg, "-y",
         "-loop", "1",
+        "-framerate", "30",
         "-i", image_path,
         "-i", audio_path,
+        "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
         "-c:v", "libx264",
+        "-preset", "veryfast",
         "-tune", "stillimage",
+        "-r", "30",
         "-c:a", "aac",
+        "-ac", "2",
+        "-ar", "48000",
         "-b:a", "192k",
         "-pix_fmt", "yuv420p",
         "-shortest",
@@ -598,10 +604,15 @@ async def _create_video_clip_from_material(
         cmd.extend(["-t", str(end_time - start_time)])
 
     cmd.extend([
+        "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
         "-c:v", "libx264",
         "-preset", "veryfast",
+        "-r", "30",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
+        "-ac", "2",
+        "-ar", "48000",
+        "-af", "aresample=async=1:first_pts=0",
         "-movflags", "+faststart",
         "-loglevel", "error",
         output_path,
@@ -699,7 +710,8 @@ def _resolve_youtube_stream_url_sync(source_video: str) -> str:
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "format": "bestvideo+bestaudio/best",
+        # Prefer muxed AV streams to keep sound in a single ffmpeg input URL.
+        "format": "best[acodec!=none][vcodec!=none]/best",
     }
 
     def _is_storyboard_or_image(fmt: Dict[str, Any]) -> bool:
@@ -724,13 +736,20 @@ def _resolve_youtube_stream_url_sync(source_video: str) -> str:
         vcodec = str(fmt.get("vcodec") or "none").casefold()
         return vcodec != "none"
 
+    def _has_audio(fmt: Dict[str, Any]) -> bool:
+        return str(fmt.get("acodec") or "none").casefold() != "none"
+
+    def _is_muxed_av_format(fmt: Dict[str, Any]) -> bool:
+        return _is_video_format(fmt) and _has_audio(fmt)
+
     def _format_score(fmt: Dict[str, Any]) -> tuple:
+        has_audio = 1 if _has_audio(fmt) else 0
         height = int(fmt.get("height") or 0)
         fps = int(fmt.get("fps") or 0)
         tbr = float(fmt.get("tbr") or 0.0)
         prefers_mp4 = 1 if str(fmt.get("ext") or "").casefold() == "mp4" else 0
-        has_audio = 1 if str(fmt.get("acodec") or "none").casefold() != "none" else 0
-        return (height, fps, tbr, prefers_mp4, has_audio)
+        # Audio presence first, then quality dimensions.
+        return (has_audio, height, fps, tbr, prefers_mp4)
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(source_video, download=False)
@@ -742,7 +761,7 @@ def _resolve_youtube_stream_url_sync(source_video: str) -> str:
             # yt-dlp usually puts selected formats here when format=... resolves cleanly.
             requested = info.get("requested_formats")
             if isinstance(requested, list) and requested:
-                candidates = [f for f in requested if isinstance(f, dict) and _is_video_format(f)]
+                candidates = [f for f in requested if isinstance(f, dict) and _is_muxed_av_format(f)]
                 if candidates:
                     best = max(candidates, key=_format_score)
                     direct = best.get("url")
@@ -753,13 +772,24 @@ def _resolve_youtube_stream_url_sync(source_video: str) -> str:
             if isinstance(direct, str) and direct.strip():
                 return direct.strip()
 
-            video_formats = [
+            muxed_formats = [
+                f
+                for f in (info.get("formats") or [])
+                if isinstance(f, dict) and _is_muxed_av_format(f)
+            ]
+            if muxed_formats:
+                best = max(muxed_formats, key=_format_score)
+                candidate = best.get("url")
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+
+            video_only_formats = [
                 f
                 for f in (info.get("formats") or [])
                 if isinstance(f, dict) and _is_video_format(f)
             ]
-            if video_formats:
-                best = max(video_formats, key=_format_score)
+            if video_only_formats:
+                best = max(video_only_formats, key=_format_score)
                 candidate = best.get("url")
                 if isinstance(candidate, str) and candidate.strip():
                     return candidate.strip()
@@ -808,7 +838,15 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
         "-f", "concat",
         "-safe", "0",
         "-i", str(concat_file),
-        "-c", "copy",
+        "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-r", "30",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-ac", "2",
+        "-ar", "48000",
+        "-af", "aresample=async=1:first_pts=0",
         "-movflags", "+faststart",
         "-loglevel", "error",
         output_path
