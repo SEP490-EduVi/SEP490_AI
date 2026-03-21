@@ -46,3 +46,9 @@ VIDEO_GCS_PREFIX = os.getenv("VIDEO_GCS_PREFIX", "generated_videos")
 VIDEO_RETURN_GCS_URI = (
 	os.getenv("VIDEO_RETURN_GCS_URI", "true").strip().lower() == "true"
 )
+
+# If false, cards that look like embedded video must resolve to real video clips,
+# otherwise pipeline raises an explicit error instead of rendering screenshot fallback.
+VIDEO_SCREENSHOT_FALLBACK = (
+	os.getenv("VIDEO_SCREENSHOT_FALLBACK", "false").strip().lower() == "true"
+)

@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import uuid
 import os
+from html import unescape
 from pathlib import Path
 from typing import List, Dict, Any, Callable, Awaitable
 from urllib.parse import urlparse
@@ -372,16 +373,24 @@ def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
         if not isinstance(html_fragment, str) or not html_fragment.strip():
             return ""
 
+        normalized_html = (
+            unescape(html_fragment)
+            .replace("\\u0026", "&")
+            .replace("\\/", "/")
+        )
+
         # Detect common iframe/video URLs embedded in HTML blocks.
         patterns = [
             r"https?://(?:www\.)?youtube\.com/embed/[^\s\"'<>]+",
             r"https?://(?:www\.)?youtube\.com/watch\?[^\s\"'<>]+",
+            r"https?://(?:www\.)?youtube\.com/shorts/[^\s\"'<>]+",
+            r"https?://(?:www\.)?youtube-nocookie\.com/embed/[^\s\"'<>]+",
             r"https?://youtu\.be/[^\s\"'<>]+",
             r"https?://[^\s\"'<>]+\.m3u8(?:\?[^\s\"'<>]*)?",
             r"https?://[^\s\"'<>]+\.mp4(?:\?[^\s\"'<>]*)?",
         ]
         for pattern in patterns:
-            hit = re.search(pattern, html_fragment, flags=re.IGNORECASE)
+            hit = re.search(pattern, normalized_html, flags=re.IGNORECASE)
             if hit:
                 return hit.group(0)
         return ""
@@ -431,6 +440,16 @@ def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
         _extract_video_url_from_html_fragment(card.get("renderHtml")),
         _extract_video_url_from_html_fragment(card.get("html")),
     )
+    if not src:
+        # Final pass: detect video URL from any block HTML even if content.type is not VIDEO.
+        for content in _iter_block_contents(card.get("children", [])):
+            src = _pick_video_url(
+                _extract_video_url_from_html_fragment(content.get("renderHtml")),
+                _extract_video_url_from_html_fragment(content.get("html")),
+            )
+            if src:
+                break
+
     if src:
         return {
             "src": src,
@@ -533,9 +552,57 @@ def _is_youtube_url(value: str) -> bool:
         return False
     return (
         "youtube.com" in host
+        or "youtube-nocookie.com" in host
         or "youtu.be" in host
         or "m.youtube.com" in host
     )
+
+
+def _card_has_video_intent(card: Dict[str, Any]) -> bool:
+    """Return True if card payload strongly suggests embedded/external video."""
+    if _extract_video_material(card):
+        return True
+
+    def _looks_like_video_text(value: Any) -> bool:
+        if not isinstance(value, str) or not value.strip():
+            return False
+        normalized = (
+            unescape(value)
+            .replace("\\u0026", "&")
+            .replace("\\/", "/")
+            .casefold()
+        )
+        markers = (
+            "youtube.com",
+            "youtu.be",
+            "youtube-nocookie.com",
+            "<iframe",
+            "video/mp4",
+            ".m3u8",
+            ".mp4",
+        )
+        return any(marker in normalized for marker in markers)
+
+    for key in ("renderedHtml", "renderHtml", "html"):
+        if _looks_like_video_text(card.get(key)):
+            return True
+
+    for content in _iter_block_contents(card.get("children", [])):
+        for key in (
+            "renderHtml",
+            "html",
+            "src",
+            "url",
+            "videoUrl",
+            "assetUrl",
+            "embedUrl",
+            "youtubeUrl",
+            "sourceUrl",
+        ):
+            if _looks_like_video_text(content.get(key)):
+                return True
+
+    return False
 
 
 def _resolve_youtube_stream_url_sync(source_video: str) -> str:
@@ -665,6 +732,12 @@ async def _process_card(
             "video_path": video_path,
             "interaction": interaction,
         }
+
+    # If this card is intended to contain a video, avoid silently falling back to screenshot.
+    if _card_has_video_intent(card) and not getattr(config, "VIDEO_SCREENSHOT_FALLBACK", False):
+        raise RuntimeError(
+            f"Card {card_num} looks like a video card, but no playable source URL could be resolved"
+        )
 
     # Get narration text
     narration = _extract_narration_from_card(card)
