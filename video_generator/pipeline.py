@@ -833,37 +833,62 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
         for vp in video_paths:
             f.write(f"file '{Path(vp).resolve().as_posix()}'\n")
     
-    cmd = [
-        ffmpeg, "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(concat_file),
-        "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-r", "30",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-ac", "2",
-        "-ar", "48000",
-        "-af", "aresample=async=1:first_pts=0",
-        "-movflags", "+faststart",
-        "-loglevel", "error",
-        output_path
-    ]
-    
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg concat failed: {stderr.decode()}")
-    
-    concat_file.unlink(missing_ok=True)
-    return output_path
+    try:
+        # Fast path: input clips are already normalized, so stream copy avoids re-encode.
+        fast_cmd = [
+            ffmpeg, "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-loglevel", "error",
+            output_path,
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *fast_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            return output_path
+
+        logger.warning("Fast concat copy failed, falling back to re-encode: %s", stderr.decode().strip())
+
+        # Compatibility fallback: re-encode to guarantee successful merge.
+        safe_cmd = [
+            ffmpeg, "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
+            "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-r", "30",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-ac", "2",
+            "-ar", "48000",
+            "-af", "aresample=async=1:first_pts=0",
+            "-movflags", "+faststart",
+            "-loglevel", "error",
+            output_path,
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *safe_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg concat failed: {stderr.decode()}")
+
+        return output_path
+    finally:
+        concat_file.unlink(missing_ok=True)
 
 
 async def _process_card(
@@ -1046,7 +1071,6 @@ async def generate_video_async(
 
         # Process cards in bounded parallelism to protect worker resources.
         max_concurrency = max(1, int(getattr(config, "MAX_SLIDE_CONCURRENCY", 4)))
-        semaphore = asyncio.Semaphore(max_concurrency)
         render_concurrency = max(1, int(getattr(config, "RENDER_CONCURRENCY", 2)))
         tts_concurrency = max(1, int(getattr(config, "TTS_CONCURRENCY", 4)))
         ffmpeg_concurrency = max(1, int(getattr(config, "FFMPEG_CONCURRENCY", 1)))
@@ -1057,25 +1081,39 @@ async def generate_video_async(
         ffmpeg_semaphore = asyncio.Semaphore(ffmpeg_concurrency)
         probe_semaphore = asyncio.Semaphore(probe_concurrency)
 
-        tasks = [
-            asyncio.create_task(_process_card_limited(
-                card,
-                i + 1,
-                tmp_dir,
-                semaphore,
-                render_semaphore,
-                tts_semaphore,
-                ffmpeg_semaphore,
-            ))
-            for i, card in enumerate(cards)
-        ]
-
         processed_cards: List[Dict[str, Any]] = []
         total_cards = len(cards)
         completed_cards = 0
+
+        card_queue: asyncio.Queue[tuple[int, Dict[str, Any]] | None] = asyncio.Queue()
+        for i, card in enumerate(cards, start=1):
+            card_queue.put_nowait((i, card))
+        for _ in range(max_concurrency):
+            card_queue.put_nowait(None)
+
+        results_queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue()
+
+        async def _worker() -> None:
+            while True:
+                item = await card_queue.get()
+                if item is None:
+                    return
+
+                card_num, card_payload = item
+                result = await _process_card(
+                    card_payload,
+                    card_num,
+                    tmp_dir,
+                    render_semaphore,
+                    tts_semaphore,
+                    ffmpeg_semaphore,
+                )
+                await results_queue.put(result)
+
+        workers = [asyncio.create_task(_worker()) for _ in range(max_concurrency)]
         try:
-            for done in asyncio.as_completed(tasks):
-                item = await done
+            for _ in range(total_cards):
+                item = await results_queue.get()
                 completed_cards += 1
                 if item:
                     processed_cards.append(item)
@@ -1088,12 +1126,14 @@ async def generate_video_async(
                     detail=f"Completed {completed_cards}/{total_cards} slide(s)",
                 )
         except Exception:
-            # Stop remaining slide tasks quickly so they do not continue after pipeline failure.
-            for task in tasks:
+            # Stop workers quickly so they do not continue after pipeline failure.
+            for task in workers:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*workers, return_exceptions=True)
             raise
+        else:
+            await asyncio.gather(*workers)
         
         # Filter out skipped cards and restore original slide order.
         processed_cards = [item for item in processed_cards if item]

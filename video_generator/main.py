@@ -73,12 +73,17 @@ async def publish_result(
     channel: aio_pika.abc.AbstractChannel,
     result: dict,
     correlation_id: str | None = None,
+    persistent: bool = True,
 ) -> None:
     """Publish a result message to the results queue."""
     await channel.default_exchange.publish(
         aio_pika.Message(
             body=json.dumps(result, ensure_ascii=False).encode(),
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            delivery_mode=(
+                aio_pika.DeliveryMode.PERSISTENT
+                if persistent
+                else aio_pika.DeliveryMode.NOT_PERSISTENT
+            ),
             content_type="application/json",
             correlation_id=correlation_id,
         ),
@@ -189,7 +194,8 @@ async def _publish_progress(
         "result": result,
         "error": error,
     }
-    await publish_result(channel, payload, correlation_id)
+    persistent = status != "processing" or bool(getattr(config, "PERSIST_PROCESSING_EVENTS", False))
+    await publish_result(channel, payload, correlation_id, persistent=persistent)
 
 
 async def _on_message(

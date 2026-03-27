@@ -17,13 +17,19 @@ RESULT_QUEUE = "pipeline.results"
 PREFETCH_COUNT = int(os.getenv("PREFETCH_COUNT", "1"))
 
 # Limit slide-level concurrency per job to avoid CPU/RAM spikes.
-MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "4"))
+MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "2"))
 
 # Stage-level throttles to stabilize throughput under load.
-RENDER_CONCURRENCY = int(os.getenv("RENDER_CONCURRENCY", "2"))
-TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "4"))
+RENDER_CONCURRENCY = int(os.getenv("RENDER_CONCURRENCY", "1"))
+TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "2"))
 FFMPEG_CONCURRENCY = int(os.getenv("FFMPEG_CONCURRENCY", "1"))
-PROBE_CONCURRENCY = int(os.getenv("PROBE_CONCURRENCY", "2"))
+PROBE_CONCURRENCY = int(os.getenv("PROBE_CONCURRENCY", "1"))
+
+# RabbitMQ message durability tuning.
+# Keep final completed/failed results persistent, allow processing progress to be transient.
+PERSIST_PROCESSING_EVENTS = (
+	os.getenv("PERSIST_PROCESSING_EVENTS", "false").strip().lower() == "true"
+)
 
 # Retry transient Edge TTS failures like NoAudioReceived.
 TTS_MAX_RETRIES = int(os.getenv("TTS_MAX_RETRIES", "3"))
