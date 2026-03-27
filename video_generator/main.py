@@ -34,6 +34,11 @@ logger = logging.getLogger("video_generator")
 _PROGRESS_DEDUP_WINDOW_SEC = float(getattr(config, "PROGRESS_DEDUP_WINDOW_SEC", 2.0))
 _recent_progress_events: dict[tuple, float] = {}
 _recent_progress_events_lock = asyncio.Lock()
+_EVENT_ID_DEDUP_WINDOW_SEC = float(getattr(config, "EVENT_ID_DEDUP_WINDOW_SEC", 60.0))
+_recent_event_ids: dict[str, float] = {}
+_recent_event_ids_lock = asyncio.Lock()
+_terminal_tasks_published: dict[str, float] = {}
+_terminal_tasks_published_lock = asyncio.Lock()
 
 
 async def _is_duplicate_progress_event(signature: tuple) -> bool:
@@ -56,6 +61,51 @@ async def _is_duplicate_progress_event(signature: tuple) -> bool:
 
         _recent_progress_events[signature] = now
         return False
+
+
+async def _is_duplicate_event_id(event_id: str, task_id: str, status: str) -> bool:
+    """Return True when same logical event was already published recently."""
+    now = time.monotonic()
+
+    async with _recent_event_ids_lock:
+        if _recent_event_ids:
+            expired = [
+                key
+                for key, ts in _recent_event_ids.items()
+                if (now - ts) > _EVENT_ID_DEDUP_WINDOW_SEC
+            ]
+            for key in expired:
+                _recent_event_ids.pop(key, None)
+
+        if event_id in _recent_event_ids:
+            return True
+
+    if status in {"completed", "failed"}:
+        async with _terminal_tasks_published_lock:
+            if _terminal_tasks_published:
+                expired = [
+                    key
+                    for key, ts in _terminal_tasks_published.items()
+                    if (now - ts) > (_EVENT_ID_DEDUP_WINDOW_SEC * 10)
+                ]
+                for key in expired:
+                    _terminal_tasks_published.pop(key, None)
+
+            if task_id in _terminal_tasks_published:
+                return True
+
+    return False
+
+
+async def _mark_event_id_published(event_id: str, task_id: str, status: str) -> None:
+    """Record logical event and terminal publication markers."""
+    now = time.monotonic()
+    async with _recent_event_ids_lock:
+        _recent_event_ids[event_id] = now
+
+    if status in {"completed", "failed"}:
+        async with _terminal_tasks_published_lock:
+            _terminal_tasks_published[task_id] = now
 
 
 async def get_connection() -> aio_pika.abc.AbstractRobustConnection:
@@ -173,6 +223,16 @@ async def _publish_progress(
         error,
         result_signature,
     )
+
+    event_id = f"{task_id}:{status}:{step}:{int(progress)}"
+    if await _is_duplicate_event_id(event_id, task_id, status):
+        logger.warning(
+            "Suppressed duplicate event_id task=%s event_id=%s",
+            task_id,
+            event_id,
+        )
+        return
+
     if await _is_duplicate_progress_event(event_signature):
         logger.warning(
             "Suppressed duplicate progress event task=%s step=%s progress=%s",
@@ -187,6 +247,7 @@ async def _publish_progress(
         "userId": user_id,
         "productId": product_id,
         "requestId": request_id,
+        "eventId": event_id,
         "status": status,
         "step": step,
         "progress": progress,
@@ -196,6 +257,7 @@ async def _publish_progress(
     }
     persistent = status != "processing" or bool(getattr(config, "PERSIST_PROCESSING_EVENTS", False))
     await publish_result(channel, payload, correlation_id, persistent=persistent)
+    await _mark_event_id_published(event_id, task_id, status)
 
 
 async def _on_message(
@@ -217,6 +279,7 @@ async def _on_message(
             msg = json.loads(message.body.decode("utf-8"))
 
             task_id = str(msg.get("taskId") or msg.get("task_id") or task_id)
+            effective_correlation_id = correlation_id or task_id
             user_id = msg.get("userId") or msg.get("user_id")
             product_id = msg.get("productId") or msg.get("product_id")
             source_request_id = msg.get("requestId") or msg.get("videoRequestId")
@@ -244,7 +307,7 @@ async def _on_message(
                     status="processing",
                     step=step,
                     progress=progress,
-                    correlation_id=correlation_id,
+                    correlation_id=effective_correlation_id,
                     detail=detail,
                 )
 
@@ -305,7 +368,7 @@ async def _on_message(
                 status="completed",
                 step="video_completed",
                 progress=100,
-                correlation_id=correlation_id,
+                correlation_id=effective_correlation_id,
                 detail="Video generated successfully",
                 result=result_payload,
             )
@@ -315,17 +378,17 @@ async def _on_message(
         except json.JSONDecodeError as e:
             logger.error("Invalid JSON in message [%s]: %s", task_id, e)
             await _publish_failure(channel, task_id, user_id, product_id,
-                                   source_request_id, correlation_id, str(e), "invalid_json")
+                                   source_request_id, (correlation_id or task_id), str(e), "invalid_json")
 
         except ValueError as e:
             logger.error("Validation error [%s]: %s", task_id, e)
             await _publish_failure(channel, task_id, user_id, product_id,
-                                   source_request_id, correlation_id, str(e), "validation_error")
+                                   source_request_id, (correlation_id or task_id), str(e), "validation_error")
 
         except Exception as e:
             logger.exception("Processing failed [%s]", task_id)
             await _publish_failure(channel, task_id, user_id, product_id,
-                                   source_request_id, correlation_id,
+                                   source_request_id, (correlation_id or task_id),
                                    f"{type(e).__name__}: {e}", "processing_error")
 
 async def _publish_failure(

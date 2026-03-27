@@ -1100,9 +1100,9 @@ async def generate_video_async(
         total_cards = len(cards)
         completed_cards = 0
 
-        card_queue: asyncio.Queue[tuple[int, Dict[str, Any]] | None] = asyncio.Queue()
-        for i, card in enumerate(cards, start=1):
-            card_queue.put_nowait((i, card))
+        card_queue: asyncio.Queue[int | None] = asyncio.Queue()
+        for idx in range(total_cards):
+            card_queue.put_nowait(idx)
         for _ in range(max_concurrency):
             card_queue.put_nowait(None)
 
@@ -1110,20 +1110,25 @@ async def generate_video_async(
 
         async def _worker() -> None:
             while True:
-                item = await card_queue.get()
-                if item is None:
+                card_index = await card_queue.get()
+                if card_index is None:
                     return
 
-                card_num, card_payload = item
-                result = await _process_card(
-                    card_payload,
-                    card_num,
-                    tmp_dir,
-                    render_semaphore,
-                    tts_semaphore,
-                    ffmpeg_semaphore,
-                )
-                await results_queue.put(result)
+                card_num = card_index + 1
+                card_payload = cards[card_index]
+                try:
+                    result = await _process_card(
+                        card_payload,
+                        card_num,
+                        tmp_dir,
+                        render_semaphore,
+                        tts_semaphore,
+                        ffmpeg_semaphore,
+                    )
+                    await results_queue.put(result)
+                finally:
+                    # Release large HTML payloads as soon as each card is processed.
+                    cards[card_index] = None
 
         workers = [asyncio.create_task(_worker()) for _ in range(max_concurrency)]
         try:
