@@ -58,3 +58,9 @@ VIDEO_RETURN_GCS_URI = (
 VIDEO_SCREENSHOT_FALLBACK = (
 	os.getenv("VIDEO_SCREENSHOT_FALLBACK", "false").strip().lower() == "true"
 )
+
+# Concat tuning: keep copy path as fast as possible in production.
+# Disable faststart on copy path by default to avoid extra remux overhead.
+CONCAT_FASTSTART_ON_COPY = (
+	os.getenv("CONCAT_FASTSTART_ON_COPY", "false").strip().lower() == "true"
+)

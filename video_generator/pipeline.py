@@ -13,6 +13,7 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 import uuid
 import os
 from html import unescape
@@ -826,6 +827,7 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
         return output_path
     
     ffmpeg = _get_ffmpeg()
+    concat_start = time.perf_counter()
     
     output_dir = Path(output_path).parent
     concat_file = output_dir / f"concat_{Path(output_path).stem}_{uuid.uuid4().hex}.txt"
@@ -841,11 +843,13 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
             "-safe", "0",
             "-i", str(concat_file),
             "-c", "copy",
-            "-movflags", "+faststart",
             "-loglevel", "error",
             output_path,
         ]
+        if bool(getattr(config, "CONCAT_FASTSTART_ON_COPY", False)):
+            fast_cmd.extend(["-movflags", "+faststart"])
 
+        fast_start = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
             *fast_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -853,9 +857,18 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
         )
         _, stderr = await proc.communicate()
         if proc.returncode == 0:
+            logger.info(
+                "Concat finished via stream copy in %.2fs (total concat stage %.2fs)",
+                time.perf_counter() - fast_start,
+                time.perf_counter() - concat_start,
+            )
             return output_path
 
-        logger.warning("Fast concat copy failed, falling back to re-encode: %s", stderr.decode().strip())
+        logger.warning(
+            "Fast concat copy failed after %.2fs, falling back to re-encode: %s",
+            time.perf_counter() - fast_start,
+            stderr.decode().strip(),
+        )
 
         # Compatibility fallback: re-encode to guarantee successful merge.
         safe_cmd = [
@@ -877,6 +890,7 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
             output_path,
         ]
 
+        safe_start = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
             *safe_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -885,6 +899,12 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg concat failed: {stderr.decode()}")
+
+        logger.info(
+            "Concat finished via re-encode in %.2fs (total concat stage %.2fs)",
+            time.perf_counter() - safe_start,
+            time.perf_counter() - concat_start,
+        )
 
         return output_path
     finally:
