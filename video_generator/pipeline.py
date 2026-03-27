@@ -61,6 +61,21 @@ def _video_track_timescale() -> str:
     return str(timescale)
 
 
+def _audio_channels() -> str:
+    channels = max(1, int(getattr(config, "AUDIO_CHANNELS", 1)))
+    return str(channels)
+
+
+def _audio_sample_rate() -> str:
+    sample_rate = max(8000, int(getattr(config, "AUDIO_SAMPLE_RATE", 24000)))
+    return str(sample_rate)
+
+
+def _audio_bitrate() -> str:
+    bitrate = str(getattr(config, "AUDIO_BITRATE", "96k") or "96k").strip()
+    return bitrate or "96k"
+
+
 async def _emit_progress(
     progress_callback: ProgressCallback | None,
     step: str,
@@ -319,8 +334,6 @@ async def _create_slide_clip(image_path: str, audio_path: str, output_path: str)
         image_path,
         "-i",
         audio_path,
-        "-vf",
-        _video_scale_filter(),
         "-threads",
         _ffmpeg_threads(),
         "-c:v",
@@ -334,9 +347,11 @@ async def _create_slide_clip(image_path: str, audio_path: str, output_path: str)
         "-c:a",
         "aac",
         "-ac",
-        "2",
+        _audio_channels(),
         "-ar",
-        "48000",
+        _audio_sample_rate(),
+        "-b:a",
+        _audio_bitrate(),
         "-pix_fmt",
         "yuv420p",
         "-video_track_timescale",
@@ -398,9 +413,11 @@ async def _create_material_clip(
             "-c:a",
             "aac",
             "-ac",
-            "2",
+            _audio_channels(),
             "-ar",
-            "48000",
+            _audio_sample_rate(),
+            "-b:a",
+            _audio_bitrate(),
             "-af",
             "aresample=async=1:first_pts=0",
             "-movflags",

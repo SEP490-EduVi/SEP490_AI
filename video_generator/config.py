@@ -36,6 +36,11 @@ VIDEO_WIDTH = int(os.getenv("VIDEO_WIDTH", "1280"))
 VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "720"))
 VIDEO_TRACK_TIMESCALE = int(os.getenv("VIDEO_TRACK_TIMESCALE", "90000"))
 
+# Audio encoding knobs (lower defaults reduce CPU and output size).
+AUDIO_CHANNELS = int(os.getenv("AUDIO_CHANNELS", "1"))
+AUDIO_SAMPLE_RATE = int(os.getenv("AUDIO_SAMPLE_RATE", "24000"))
+AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "96k")
+
 # Fastest/lowest-CPU concat mode is stream-copy.
 # Keep fallback disabled by default; enable only when copy fails on mixed assets.
 CONCAT_ALLOW_REENCODE_FALLBACK = (

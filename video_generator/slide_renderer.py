@@ -11,10 +11,12 @@ import os
 from pathlib import Path
 from typing import Any, Dict
 
+from . import config
+
 logger = logging.getLogger(__name__)
 
-SLIDE_WIDTH = 1280
-SLIDE_HEIGHT = 720
+SLIDE_WIDTH = max(320, int(getattr(config, "VIDEO_WIDTH", 1280)))
+SLIDE_HEIGHT = max(180, int(getattr(config, "VIDEO_HEIGHT", 720)))
 
 _browser = None
 _playwright = None
