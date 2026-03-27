@@ -164,6 +164,15 @@ def _get_ffmpeg() -> str:
     return _find_binary("ffmpeg")
 
 
+def _get_ffmpeg_threads() -> str:
+    """Return ffmpeg thread count as string for subprocess arguments."""
+    try:
+        value = int(getattr(config, "FFMPEG_THREADS", 1))
+    except (TypeError, ValueError):
+        value = 1
+    return str(max(1, value))
+
+
 def _iter_block_contents(nodes: List[Dict[str, Any]]):
     """Yield BLOCK content objects from nested card tree."""
     for node in nodes:
@@ -544,6 +553,7 @@ async def _create_slide_video(
 ) -> str:
     """Create a video clip from image + audio using ffmpeg."""
     ffmpeg = _get_ffmpeg()
+    ffmpeg_threads = _get_ffmpeg_threads()
     
     cmd = [
         ffmpeg, "-y",
@@ -552,6 +562,7 @@ async def _create_slide_video(
         "-i", image_path,
         "-i", audio_path,
         "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-threads", ffmpeg_threads,
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-tune", "stillimage",
@@ -589,6 +600,7 @@ async def _create_video_clip_from_material(
 ) -> str:
     """Create a normalized MP4 clip from source video material."""
     ffmpeg = _get_ffmpeg()
+    ffmpeg_threads = _get_ffmpeg_threads()
     resolved_source = await _resolve_material_source_for_ffmpeg(source_video)
 
     cmd = [ffmpeg, "-y"]
@@ -606,6 +618,7 @@ async def _create_video_clip_from_material(
 
     cmd.extend([
         "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-threads", ffmpeg_threads,
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-r", "30",
@@ -827,6 +840,7 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
         return output_path
     
     ffmpeg = _get_ffmpeg()
+    ffmpeg_threads = _get_ffmpeg_threads()
     concat_start = time.perf_counter()
     
     output_dir = Path(output_path).parent
@@ -843,11 +857,13 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
             "-safe", "0",
             "-i", str(concat_file),
             "-c", "copy",
-            "-loglevel", "error",
-            output_path,
         ]
         if bool(getattr(config, "CONCAT_FASTSTART_ON_COPY", False)):
             fast_cmd.extend(["-movflags", "+faststart"])
+        fast_cmd.extend([
+            "-loglevel", "error",
+            output_path,
+        ])
 
         fast_start = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
@@ -877,6 +893,7 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
             "-safe", "0",
             "-i", str(concat_file),
             "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-threads", ffmpeg_threads,
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-r", "30",
@@ -972,7 +989,7 @@ async def _process_card(
     
     async def _render_one() -> None:
         async with render_semaphore:
-            await render_slide_async(card, image_path, slide_number=card_num)
+            await render_slide_async(card, image_path)
 
     async def _tts_one() -> None:
         async with tts_semaphore:
@@ -990,28 +1007,6 @@ async def _process_card(
         "video_path": video_path,
         "interaction": interaction,
     }
-
-
-async def _process_card_limited(
-    card: Dict[str, Any],
-    card_num: int,
-    tmp_dir: Path,
-    semaphore: asyncio.Semaphore,
-    render_semaphore: asyncio.Semaphore,
-    tts_semaphore: asyncio.Semaphore,
-    ffmpeg_semaphore: asyncio.Semaphore,
-) -> Dict[str, Any] | None:
-    """Process one card while respecting global per-job concurrency limit."""
-    async with semaphore:
-        return await _process_card(
-            card,
-            card_num,
-            tmp_dir,
-            render_semaphore,
-            tts_semaphore,
-            ffmpeg_semaphore,
-        )
-
 
 async def _get_video_duration_limited(video_path: str, semaphore: asyncio.Semaphore) -> float:
     """Get duration while throttling ffprobe process fan-out."""

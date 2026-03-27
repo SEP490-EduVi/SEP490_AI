@@ -17,13 +17,16 @@ RESULT_QUEUE = "pipeline.results"
 PREFETCH_COUNT = int(os.getenv("PREFETCH_COUNT", "1"))
 
 # Limit slide-level concurrency per job to avoid CPU/RAM spikes.
-MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "2"))
+MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "1"))
 
 # Stage-level throttles to stabilize throughput under load.
 RENDER_CONCURRENCY = int(os.getenv("RENDER_CONCURRENCY", "1"))
-TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "2"))
+TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "1"))
 FFMPEG_CONCURRENCY = int(os.getenv("FFMPEG_CONCURRENCY", "1"))
 PROBE_CONCURRENCY = int(os.getenv("PROBE_CONCURRENCY", "1"))
+
+# Limit CPU pressure per ffmpeg process.
+FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "1"))
 
 # RabbitMQ message durability tuning.
 # Keep final completed/failed results persistent, allow processing progress to be transient.
@@ -37,7 +40,7 @@ TTS_RETRY_DELAY_SEC = float(os.getenv("TTS_RETRY_DELAY_SEC", "0.8"))
 
 # Keep Playwright browser alive across requests for better throughput.
 CLEANUP_BROWSER_EACH_REQUEST = (
-	os.getenv("CLEANUP_BROWSER_EACH_REQUEST", "false").strip().lower() == "true"
+	os.getenv("CLEANUP_BROWSER_EACH_REQUEST", "true").strip().lower() == "true"
 )
 
 # ── Video Output ──────────────────────────────────────────────────────────────

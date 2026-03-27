@@ -7,8 +7,9 @@ Strict JSON mode:
 
 import asyncio
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +20,6 @@ _browser = None
 _playwright = None
 _browser_lock = None
 _current_loop = None
-
-
-def reset_browser_state() -> None:
-    """Reset browser globals. Must be called at start of each asyncio.run() scope."""
-    global _browser, _playwright, _browser_lock, _current_loop
-    _browser = None
-    _playwright = None
-    _browser_lock = None
-    _current_loop = None
 
 
 async def _get_browser():
@@ -54,7 +46,18 @@ async def _get_browser():
             from playwright.async_api import async_playwright
 
             _playwright = await async_playwright().start()
-            _browser = await _playwright.chromium.launch()
+            launch_args = [
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--no-zygote",
+            ]
+            if os.getenv("PLAYWRIGHT_NO_SANDBOX", "true").strip().lower() == "true":
+                launch_args.append("--no-sandbox")
+
+            _browser = await _playwright.chromium.launch(
+                headless=True,
+                args=launch_args,
+            )
             _current_loop = running_loop
         return _browser
 
@@ -104,7 +107,6 @@ def _get_card_html_document(card: Dict[str, Any]) -> str:
 async def render_slide_async(
     card: Dict[str, Any],
     output_path: str,
-    slide_number: Optional[int] = None,
 ) -> str:
     """Render a slide image from card payload HTML using Playwright."""
     output = Path(output_path)

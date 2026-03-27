@@ -262,7 +262,7 @@ async def _on_message(
 
             # Load lesson payload (may be GCS URI or inline data)
             lesson_data = await asyncio.to_thread(
-                _extract_lesson_payload_sync, msg
+                _extract_lesson_payload, msg
             )
 
             await _publish_processing(
@@ -327,12 +327,6 @@ async def _on_message(
             await _publish_failure(channel, task_id, user_id, product_id,
                                    source_request_id, correlation_id,
                                    f"{type(e).__name__}: {e}", "processing_error")
-
-
-def _extract_lesson_payload_sync(message: dict):
-    """Sync wrapper — called via asyncio.to_thread for GCS I/O."""
-    return _extract_lesson_payload(message)
-
 
 async def _publish_failure(
     channel: aio_pika.abc.AbstractChannel,
