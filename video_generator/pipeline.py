@@ -1,41 +1,39 @@
-"""
-Video generation pipeline — optimized version.
-
-Flow:
-    JSON → Extract cards (keeps original HTML)
-        → Parallel: [Playwright screenshot] + [Edge TTS]
-        → ffmpeg: image + audio → slide video
-        → ffmpeg concat → final video
-"""
+"""Minimal video generation pipeline for EduVi."""
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import tempfile
-import time
 import uuid
-import os
 from html import unescape
 from pathlib import Path
-from typing import List, Dict, Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
-from .slide_renderer import render_slide_async, cleanup_browser
+from . import config
+from .slide_renderer import cleanup_browser, render_slide_async
 from .tts import generate_audio_async
 from .utils import extract_lesson_data, strip_html_tags
-from . import config
 
 logger = logging.getLogger(__name__)
 
-_BINARY_CACHE: Dict[str, str] = {}
-
-# Directory where finished videos are served from
 OUTPUT_DIR = Path(config.OUTPUT_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-
 ProgressCallback = Callable[[str, int, str | None], Awaitable[None] | None]
+
+
+def _find_binary(name: str) -> str:
+    exe = shutil.which(name)
+    if exe:
+        return exe
+    raise RuntimeError(f"{name} not found in PATH")
+
+
+def _ffmpeg_threads() -> str:
+    return str(max(1, int(getattr(config, "FFMPEG_THREADS", 1))))
 
 
 async def _emit_progress(
@@ -44,141 +42,18 @@ async def _emit_progress(
     progress: int,
     detail: str | None = None,
 ) -> None:
-    """Emit progress via callback if provided."""
     if not progress_callback:
         return
-
-    maybe_awaitable = progress_callback(step, progress, detail)
+    maybe_awaitable = progress_callback(step, int(progress), detail)
     if asyncio.iscoroutine(maybe_awaitable):
         await maybe_awaitable
 
 
-def _build_gcs_uri(bucket: str, blob_name: str) -> str:
-    return f"gs://{bucket}/{blob_name}"
-
-
-def _upload_video_to_gcs(local_path: str, request_id: str) -> str | None:
-    """Upload local video to GCS and return gs:// URI."""
-    bucket_name = (getattr(config, "GCS_BUCKET_NAME", "") or "").strip()
-    if not bucket_name:
-        return None
-
-    prefix = str(getattr(config, "VIDEO_GCS_PREFIX", "generated_videos") or "generated_videos").strip("/")
-    blob_name = f"{prefix}/{request_id}.mp4" if prefix else f"{request_id}.mp4"
-
-    # Lazy import to keep local-only usage lightweight.
-    from google.cloud import storage
-
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob = bucket.blob(blob_name)
-    blob.upload_from_filename(local_path, content_type="video/mp4")
-
-    uri = _build_gcs_uri(bucket_name, blob_name)
-    logger.info("Uploaded video to GCS: %s", uri)
-    return uri
-
-
-def _find_binary(binary_name: str) -> str:
-    """Find executable path with Windows-friendly fallbacks."""
-    cached = _BINARY_CACHE.get(binary_name)
-    if cached:
-        return cached
-
-    # 1) Respect current PATH first.
-    exe = shutil.which(binary_name)
-    if exe:
-        _BINARY_CACHE[binary_name] = exe
-        return exe
-
-    # 2) Optional explicit override from environment.
-    bin_dir = os.getenv("FFMPEG_BIN_DIR", "").strip()
-    if bin_dir:
-        candidate = Path(bin_dir) / f"{binary_name}.exe"
-        if candidate.exists():
-            resolved = str(candidate)
-            _BINARY_CACHE[binary_name] = resolved
-            return resolved
-
-    # 3) Windows Winget common install location fallback.
-    if os.name == "nt":
-        local_app_data = os.getenv("LOCALAPPDATA", "")
-        if local_app_data:
-            winget_base = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
-            if winget_base.exists():
-                patterns = [
-                    "Gyan.FFmpeg_*/*/bin",
-                    "*FFmpeg*/*/bin",
-                ]
-                for pattern in patterns:
-                    for bin_path in winget_base.glob(pattern):
-                        candidate = bin_path / f"{binary_name}.exe"
-                        if candidate.exists():
-                            resolved = str(candidate)
-                            _BINARY_CACHE[binary_name] = resolved
-                            return resolved
-
-    raise RuntimeError(f"{binary_name} not found in PATH")
-
-
-def _normalize_text_for_compare(value: str) -> str:
-    """Normalize text for fuzzy duplicate checks."""
-    return re.sub(r"\s+", " ", (value or "").strip()).casefold()
-
-
-def _card_has_title_in_children_for_tts(card: Dict[str, Any], card_title: str) -> bool:
-    """Return True if card children already include the title text."""
-    target = _normalize_text_for_compare(card_title)
-    if not target:
-        return False
-
-    def walk(nodes: List[Dict[str, Any]]) -> bool:
-        for node in nodes:
-            node_type = (node.get("type") or "").upper()
-
-            if node_type == "LAYOUT":
-                if walk(node.get("children", [])):
-                    return True
-                continue
-
-            if node_type != "BLOCK":
-                continue
-
-            content = node.get("content", {})
-            content_type = (content.get("type") or "").upper()
-            if content_type not in ("TEXT", "HEADING"):
-                continue
-
-            text = strip_html_tags(content.get("html", ""))
-            normalized = _normalize_text_for_compare(text)
-            if normalized == target or normalized.startswith(target):
-                return True
-
-        return False
-
-    return walk(card.get("children", []))
-
-
-def _get_ffmpeg() -> str:
-    """Get ffmpeg executable path."""
-    return _find_binary("ffmpeg")
-
-
-def _get_ffmpeg_threads() -> str:
-    """Return ffmpeg thread count as string for subprocess arguments."""
-    try:
-        value = int(getattr(config, "FFMPEG_THREADS", 1))
-    except (TypeError, ValueError):
-        value = 1
-    return str(max(1, value))
-
-
-def _iter_block_contents(nodes: List[Dict[str, Any]]):
-    """Yield BLOCK content objects from nested card tree."""
+def _iter_block_contents(nodes: list[dict]) -> Any:
     for node in nodes:
-        node_type = (node.get("type") or "").upper()
+        node_type = str(node.get("type") or "").upper()
         if node_type == "LAYOUT":
-            yield from _iter_block_contents(node.get("children", []))
+            yield from _iter_block_contents(node.get("children") or [])
             continue
         if node_type != "BLOCK":
             continue
@@ -187,47 +62,44 @@ def _iter_block_contents(nodes: List[Dict[str, Any]]):
             yield content
 
 
-def _extract_interaction_payload(card: Dict[str, Any]) -> Dict[str, Any] | None:
-    """Extract FE interaction payload from card when card is interactive."""
-    card_title = str(card.get("title") or "").strip()
+def _extract_interaction_payload(card: dict) -> dict | None:
+    title = str(card.get("title") or "").strip()
 
-    for content in _iter_block_contents(card.get("children", [])):
-        content_type = (content.get("type") or "").upper()
+    for content in _iter_block_contents(card.get("children") or []):
+        ctype = str(content.get("type") or "").upper()
 
-        if content_type == "QUIZ":
+        if ctype == "QUIZ":
             questions = content.get("questions") or []
             if not questions:
                 return None
             q = questions[0] or {}
+            options = []
+            for opt in q.get("options") or []:
+                if isinstance(opt, dict):
+                    text = str(opt.get("text") or "").strip()
+                else:
+                    text = str(opt).strip()
+                if text:
+                    options.append(text)
 
-            options: List[str] = []
-            for opt in q.get("options", []):
-                options.append((opt.get("text", "") if isinstance(opt, dict) else str(opt)).strip())
-
-            cleaned_options = [o for o in options if o]
-            correct_index_raw = q.get("correctIndex")
+            correct_index = q.get("correctIndex")
             try:
-                correct_index = int(correct_index_raw)
+                correct_index = int(correct_index)
             except (TypeError, ValueError):
                 correct_index = None
 
-            correct_answer = None
-            if correct_index is not None and 0 <= correct_index < len(cleaned_options):
-                correct_answer = cleaned_options[correct_index]
-
             return {
                 "type": "quiz",
-                "title": card_title,
+                "title": title,
                 "question": str(q.get("question") or "").strip(),
-                "options": cleaned_options,
+                "options": options,
                 "correctIndex": correct_index,
-                "correctAnswer": correct_answer,
             }
 
-        if content_type == "FLASHCARD":
+        if ctype == "FLASHCARD":
+            cards = content.get("cards") or []
             front = ""
             back = ""
-            cards = content.get("cards") or []
             if isinstance(cards, list) and cards:
                 front = str((cards[0] or {}).get("front") or "").strip()
                 back = str((cards[0] or {}).get("back") or "").strip()
@@ -235,415 +107,138 @@ def _extract_interaction_payload(card: Dict[str, Any]) -> Dict[str, Any] | None:
                 front = str(content.get("front") or "").strip()
             if not back:
                 back = str(content.get("back") or "").strip()
-            if not front:
-                return None
+            if front:
+                return {
+                    "type": "flashcard",
+                    "title": title,
+                    "front": front,
+                    "back": back,
+                }
+            return None
 
-            return {
-                "type": "flashcard",
-                "title": card_title,
-                "front": front,
-                "back": back,
-            }
-
-        if content_type == "FILL_BLANK":
+        if ctype == "FILL_BLANK":
             sentence = str(content.get("sentence") or "").strip()
             blanks = content.get("blanks") or []
-            hint = str(content.get("hint") or "").strip()
-
-            # Support schema where FILL_BLANK keeps data under exercises[].
             if (not sentence or not blanks) and isinstance(content.get("exercises"), list):
-                ex = (content.get("exercises") or [{}])[0] or {}
-                sentence = sentence or str(ex.get("sentence") or "").strip()
-                blanks = blanks or (ex.get("blanks") or [])
-                hint = hint or str(ex.get("hint") or "").strip()
-
-            if not sentence:
-                return None
-
-            clean_blanks = [str(b).strip() for b in blanks if str(b).strip()]
-            return {
-                "type": "fill_blank",
-                "title": card_title,
-                "sentence": sentence,
-                "blanks": clean_blanks,
-                "hint": hint,
-            }
+                exercise = (content.get("exercises") or [{}])[0] or {}
+                sentence = sentence or str(exercise.get("sentence") or "").strip()
+                blanks = blanks or (exercise.get("blanks") or [])
+            if sentence:
+                return {
+                    "type": "fill_blank",
+                    "title": title,
+                    "sentence": sentence,
+                    "blanks": [str(v).strip() for v in blanks if str(v).strip()],
+                }
+            return None
 
     return None
 
 
-def _extract_narration_from_card(card: Dict[str, Any]) -> str:
-    """Extract text for TTS narration from a card."""
-    parts = []
-    
-    # Add title
-    title = (card.get("title") or "").strip()
-    if title and not _card_has_title_in_children_for_tts(card, title):
-        parts.append(title)
-    
-    # Extract text from children
-    for child in card.get("children", []):
-        _extract_text_recursive(child, parts)
-    
-    narration = ". ".join(parts)
-    if narration and narration[-1] not in ".!?…":
-        narration += "."
-    return narration
-
-
-def _extract_text_recursive(node: Dict[str, Any], parts: List[str]):
-    """Recursively extract text from BLOCK/LAYOUT nodes."""
-    node_type = node.get("type", "").upper()
-    
-    if node_type == "LAYOUT":
-        for child in node.get("children", []):
-            _extract_text_recursive(child, parts)
-    
-    elif node_type == "BLOCK":
-        content = node.get("content", {})
-        content_type = content.get("type", "").upper()
-        
-        if content_type in ("TEXT", "HEADING"):
-            html = content.get("html", "")
-            text = strip_html_tags(html)
-            if text:
-                parts.append(text)
-        elif content_type == "QUIZ":
-            questions = content.get("questions", [])
-            for q in questions:
-                question_text = (q.get("question") or "").strip()
-                if question_text:
-                    parts.append(question_text)
-
-                options = q.get("options", [])
-                for opt in options:
-                    option_text = opt.get("text", "") if isinstance(opt, dict) else str(opt)
-                    option_text = option_text.strip()
-                    if option_text:
-                        parts.append(option_text)
-
-        elif content_type == "FLASHCARD":
-            cards = content.get("cards") or []
-            if cards and isinstance(cards, list):
-                for fc in cards:
-                    front = (fc.get("front") or "").strip()
-                    if front:
-                        parts.append(front)
-                    else:
-                        # Fallback only when front is missing.
-                        back = strip_html_tags(fc.get("back", ""))
-                        if back:
-                            parts.append(back)
-            else:
-                front = (content.get("front") or "").strip()
-                if front:
-                    parts.append(front)
-                else:
-                    back = strip_html_tags(content.get("back", ""))
-                    if back:
-                        parts.append(back)
-
-        elif content_type == "FILL_BLANK":
-            exercises = content.get("exercises") or []
-            if isinstance(exercises, list) and exercises:
-                for ex in exercises:
-                    sentence = str((ex or {}).get("sentence") or "").strip()
-                    if sentence:
-                        spoken = re.sub(r"\[.*?\]", "chỗ trống", sentence)
-                        parts.append(spoken)
-
-                    blanks = (ex or {}).get("blanks") or []
-                    for b in blanks:
-                        blank_text = str(b).strip()
-                        if blank_text:
-                            parts.append(blank_text)
-            else:
-                sentence = (content.get("sentence") or "").strip()
-                if sentence:
-                    # Replace [blank] markers with spoken placeholder.
-                    spoken = re.sub(r"\[.*?\]", "chỗ trống", sentence)
-                    parts.append(spoken)
-
-                blanks = content.get("blanks") or []
-                for b in blanks:
-                    blank_text = str(b).strip()
-                    if blank_text:
-                        parts.append(blank_text)
-
-
-def _extract_video_material(card: Dict[str, Any]) -> Dict[str, Any] | None:
-    """Extract source video info from a VIDEO block if present."""
-    def _normalize_candidate_url(value: Any) -> str:
+def _extract_video_source(card: dict) -> dict | None:
+    def normalize(value: Any) -> str:
         if not isinstance(value, str):
             return ""
-
-        normalized = (
-            unescape(value)
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-            .strip()
-        )
-        if not normalized:
+        v = unescape(value).replace("\\u0026", "&").replace("\\/", "/").strip()
+        if not v:
             return ""
-
-        if normalized.startswith("//"):
-            return f"https:{normalized}"
-
-        if normalized.startswith(("http://", "https://", "gs://", "file://", "/")):
-            return normalized
-
+        if v.startswith("//"):
+            return f"https:{v}"
+        if v.startswith(("http://", "https://", "gs://", "file://", "/")):
+            return v
         return ""
 
-    def _pick_video_url(*values: Any) -> str:
-        for value in values:
-            candidate = _normalize_candidate_url(value)
-            if candidate:
-                return candidate
-        return ""
-
-    def _extract_video_url_from_html_fragment(html_fragment: Any) -> str:
-        if not isinstance(html_fragment, str) or not html_fragment.strip():
+    def from_html(raw_html: Any) -> str:
+        if not isinstance(raw_html, str) or not raw_html.strip():
             return ""
-
-        normalized_html = (
-            unescape(html_fragment)
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-        )
-
-        # Detect common iframe/video URLs embedded in HTML blocks.
-        patterns = [
+        hit = re.search(
             r"<(?:iframe|video|source)\\b[^>]*\\bsrc\\s*=\\s*[\"']([^\"']+)[\"']",
-            r"<(?:iframe|video|source)\\b[^>]*\\bdata-src\\s*=\\s*[\"']([^\"']+)[\"']",
-            r"https?://(?:www\.)?youtube\.com/embed/[^\s\"'<>]+",
-            r"https?://(?:www\.)?youtube\.com/watch\?[^\s\"'<>]+",
-            r"https?://(?:www\.)?youtube\.com/shorts/[^\s\"'<>]+",
-            r"https?://(?:www\.)?youtube-nocookie\.com/embed/[^\s\"'<>]+",
-            r"https?://youtu\.be/[^\s\"'<>]+",
-            r"https?://[^\s\"'<>]+\.m3u8(?:\?[^\s\"'<>]*)?",
-            r"https?://[^\s\"'<>]+\.mp4(?:\?[^\s\"'<>]*)?",
-            r"//(?:www\.)?youtube\.com/embed/[^\s\"'<>]+",
-            r"//(?:www\.)?youtube-nocookie\.com/embed/[^\s\"'<>]+",
-            r"//[^\s\"'<>]+\.m3u8(?:\?[^\s\"'<>]*)?",
-            r"//[^\s\"'<>]+\.mp4(?:\?[^\s\"'<>]*)?",
-        ]
-        for pattern in patterns:
-            hit = re.search(pattern, normalized_html, flags=re.IGNORECASE)
-            if hit:
-                return _normalize_candidate_url(hit.group(1) if hit.lastindex else hit.group(0))
+            unescape(raw_html),
+            flags=re.IGNORECASE,
+        )
+        if hit:
+            return normalize(hit.group(1))
         return ""
 
-    def _collect_candidate_urls(payload: Any) -> List[str]:
-        """Recursively collect possible video URLs from nested payload structures."""
-        candidates: List[str] = []
-
-        if isinstance(payload, dict):
-            candidate_keys = {
-                "src",
-                "url",
-                "videoUrl",
-                "assetUrl",
-                "embedUrl",
-                "youtubeUrl",
-                "sourceUrl",
-                "streamUrl",
-                "playUrl",
-                "downloadUrl",
-                "hlsUrl",
-                "fileUrl",
-            }
-            for key, value in payload.items():
-                if key in candidate_keys:
-                    url = _normalize_candidate_url(value)
-                    if url:
-                        candidates.append(url)
-
-                if isinstance(value, (dict, list, tuple)):
-                    candidates.extend(_collect_candidate_urls(value))
-                elif isinstance(value, str) and any(marker in value.casefold() for marker in ("<iframe", "<video", "<source", "youtube", ".mp4", ".m3u8")):
-                    from_html = _extract_video_url_from_html_fragment(value)
-                    if from_html:
-                        candidates.append(from_html)
-
-        elif isinstance(payload, (list, tuple)):
-            for item in payload:
-                candidates.extend(_collect_candidate_urls(item))
-
-        return candidates
-
-    for content in _iter_block_contents(card.get("children", [])):
-        if (content.get("type") or "").upper() != "VIDEO":
+    for content in _iter_block_contents(card.get("children") or []):
+        ctype = str(content.get("type") or "").upper()
+        if ctype != "VIDEO":
             continue
 
-        material = content.get("material") if isinstance(content.get("material"), dict) else {}
-        src = _pick_video_url(
-            content.get("src"),
-            content.get("videoUrl"),
-            content.get("url"),
-            content.get("assetUrl"),
-            content.get("embedUrl"),
-            content.get("youtubeUrl"),
-            content.get("sourceUrl"),
-            material.get("url"),
-            material.get("src"),
-            material.get("videoUrl"),
-            material.get("embedUrl"),
-            material.get("youtubeUrl"),
-            _extract_video_url_from_html_fragment(content.get("renderHtml")),
-            _extract_video_url_from_html_fragment(content.get("html")),
-            *_collect_candidate_urls(content),
+        material = content.get("material") or {}
+        src = (
+            normalize(content.get("src"))
+            or normalize(content.get("url"))
+            or normalize(content.get("videoUrl"))
+            or normalize(material.get("url"))
+            or normalize(material.get("src"))
+            or from_html(content.get("renderHtml"))
+            or from_html(content.get("html"))
         )
         if not src:
             continue
 
-        def _as_float(v):
+        def as_float(v: Any) -> float | None:
             try:
                 return float(v)
             except (TypeError, ValueError):
                 return None
 
-        start_time = _as_float(content.get("startTime") or content.get("start"))
-        end_time = _as_float(content.get("endTime") or content.get("end"))
-
         return {
             "src": src,
-            "start_time": start_time,
-            "end_time": end_time,
-        }
-
-    # Some payloads do not mark content.type as VIDEO but still provide playable URL metadata.
-    loose_candidates = _collect_candidate_urls(card)
-    if loose_candidates:
-        return {
-            "src": loose_candidates[0],
-            "start_time": None,
-            "end_time": None,
-        }
-
-    # Fallback: detect embedded video URL directly from card-level HTML payload.
-    src = _pick_video_url(
-        _extract_video_url_from_html_fragment(card.get("renderedHtml")),
-        _extract_video_url_from_html_fragment(card.get("renderHtml")),
-        _extract_video_url_from_html_fragment(card.get("html")),
-    )
-    if not src:
-        # Final pass: detect video URL from any block HTML even if content.type is not VIDEO.
-        for content in _iter_block_contents(card.get("children", [])):
-            src = _pick_video_url(
-                _extract_video_url_from_html_fragment(content.get("renderHtml")),
-                _extract_video_url_from_html_fragment(content.get("html")),
-            )
-            if src:
-                break
-
-    if src:
-        return {
-            "src": src,
-            "start_time": None,
-            "end_time": None,
+            "start": as_float(content.get("startTime") or content.get("start")),
+            "end": as_float(content.get("endTime") or content.get("end")),
         }
 
     return None
 
 
-async def _create_slide_video(
-    image_path: str,
-    audio_path: str,
-    output_path: str,
-) -> str:
-    """Create a video clip from image + audio using ffmpeg."""
-    ffmpeg = _get_ffmpeg()
-    ffmpeg_threads = _get_ffmpeg_threads()
-    
-    cmd = [
-        ffmpeg, "-y",
-        "-loop", "1",
-        "-framerate", "30",
-        "-i", image_path,
-        "-i", audio_path,
-        "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-        "-threads", ffmpeg_threads,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "stillimage",
-        "-r", "30",
-        "-c:a", "aac",
-        "-ac", "2",
-        "-ar", "48000",
-        "-b:a", "192k",
-        "-pix_fmt", "yuv420p",
-        "-shortest",
-        "-movflags", "+faststart",
-        "-loglevel", "error",
-        output_path
-    ]
-    
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {stderr.decode()}")
-    
-    logger.info("Created slide video: %s", Path(output_path).name)
-    return output_path
+def _extract_narration(card: dict) -> str:
+    parts: list[str] = []
+    title = str(card.get("title") or "").strip()
+    if title:
+        parts.append(title)
 
+    for content in _iter_block_contents(card.get("children") or []):
+        ctype = str(content.get("type") or "").upper()
+        if ctype in {"TEXT", "HEADING"}:
+            txt = strip_html_tags(str(content.get("html") or ""))
+            if txt:
+                parts.append(txt)
+            continue
 
-async def _create_video_clip_from_material(
-    source_video: str,
-    output_path: str,
-    start_time: float | None = None,
-    end_time: float | None = None,
-) -> str:
-    """Create a normalized MP4 clip from source video material."""
-    ffmpeg = _get_ffmpeg()
-    ffmpeg_threads = _get_ffmpeg_threads()
-    resolved_source = await _resolve_material_source_for_ffmpeg(source_video)
+        if ctype == "QUIZ":
+            for q in content.get("questions") or []:
+                q_text = str((q or {}).get("question") or "").strip()
+                if q_text:
+                    parts.append(q_text)
+                for opt in (q or {}).get("options") or []:
+                    if isinstance(opt, dict):
+                        o = str(opt.get("text") or "").strip()
+                    else:
+                        o = str(opt).strip()
+                    if o:
+                        parts.append(o)
+            continue
 
-    cmd = [ffmpeg, "-y"]
-    if start_time is not None and start_time >= 0:
-        cmd.extend(["-ss", str(start_time)])
+        if ctype == "FLASHCARD":
+            cards = content.get("cards") or []
+            if isinstance(cards, list):
+                for item in cards:
+                    front = str((item or {}).get("front") or "").strip()
+                    if front:
+                        parts.append(front)
+            continue
 
-    cmd.extend(["-i", resolved_source])
+        if ctype == "FILL_BLANK":
+            sentence = str(content.get("sentence") or "").strip()
+            if sentence:
+                parts.append(re.sub(r"\[.*?\]", "chỗ trống", sentence))
 
-    if (
-        start_time is not None
-        and end_time is not None
-        and end_time > start_time
-    ):
-        cmd.extend(["-t", str(end_time - start_time)])
-
-    cmd.extend([
-        "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-        "-threads", ffmpeg_threads,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-r", "30",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-ac", "2",
-        "-ar", "48000",
-        "-af", "aresample=async=1:first_pts=0",
-        "-movflags", "+faststart",
-        "-loglevel", "error",
-        output_path,
-    ])
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg material video failed: {stderr.decode()}")
-
-    logger.info("Created video clip from material: %s", Path(output_path).name)
-    return output_path
+    narration = ". ".join([p for p in parts if p])
+    if narration and narration[-1] not in ".!?":
+        narration += "."
+    return narration
 
 
 def _is_youtube_url(value: str) -> bool:
@@ -651,271 +246,216 @@ def _is_youtube_url(value: str) -> bool:
         host = (urlparse(value).netloc or "").lower()
     except Exception:
         return False
-    return (
-        "youtube.com" in host
-        or "youtube-nocookie.com" in host
-        or "youtu.be" in host
-        or "m.youtube.com" in host
+    return "youtube.com" in host or "youtu.be" in host or "youtube-nocookie.com" in host
+
+
+def _resolve_youtube_url_sync(source: str) -> str:
+    import yt_dlp
+
+    with yt_dlp.YoutubeDL(
+        {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "format": "best[acodec!=none][vcodec!=none]/best",
+        }
+    ) as ydl:
+        info = ydl.extract_info(source, download=False)
+        if isinstance(info, dict) and isinstance(info.get("url"), str):
+            return info["url"].strip()
+        formats = (info or {}).get("formats") or []
+        for fmt in formats:
+            url = fmt.get("url")
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+
+    raise RuntimeError("Cannot resolve Youtube media URL")
+
+
+async def _resolve_material_source(source: str) -> str:
+    src = str(source or "").strip()
+    if not src:
+        raise RuntimeError("Empty material source")
+    if _is_youtube_url(src):
+        return await asyncio.to_thread(_resolve_youtube_url_sync, src)
+    return src
+
+
+async def _create_slide_clip(image_path: str, audio_path: str, output_path: str) -> None:
+    ffmpeg = _find_binary("ffmpeg")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-loop",
+        "1",
+        "-framerate",
+        "30",
+        "-i",
+        image_path,
+        "-i",
+        audio_path,
+        "-vf",
+        "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        "-threads",
+        _ffmpeg_threads(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-tune",
+        "stillimage",
+        "-r",
+        "30",
+        "-c:a",
+        "aac",
+        "-ac",
+        "2",
+        "-ar",
+        "48000",
+        "-pix_fmt",
+        "yuv420p",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        "-loglevel",
+        "error",
+        output_path,
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg create slide clip failed: {stderr.decode()}")
+
+
+async def _create_material_clip(
+    source_video: str,
+    output_path: str,
+    start_time: float | None,
+    end_time: float | None,
+) -> None:
+    ffmpeg = _find_binary("ffmpeg")
+    source = await _resolve_material_source(source_video)
+
+    cmd = [ffmpeg, "-y"]
+    if start_time is not None and start_time >= 0:
+        cmd.extend(["-ss", str(start_time)])
+    cmd.extend(["-i", source])
+    if (
+        start_time is not None
+        and end_time is not None
+        and end_time > start_time
+    ):
+        cmd.extend(["-t", str(end_time - start_time)])
+
+    cmd.extend(
+        [
+            "-vf",
+            "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            "-threads",
+            _ffmpeg_threads(),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-r",
+            "30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-movflags",
+            "+faststart",
+            "-loglevel",
+            "error",
+            output_path,
+        ]
     )
 
-
-def _card_has_video_intent(card: Dict[str, Any]) -> bool:
-    """Return True if card payload strongly suggests embedded/external video."""
-    if _extract_video_material(card):
-        return True
-
-    # Explicit VIDEO blocks should never silently downgrade to screenshot.
-    for content in _iter_block_contents(card.get("children", [])):
-        if (content.get("type") or "").upper() == "VIDEO":
-            return True
-
-    def _looks_like_video_text(value: Any) -> bool:
-        if not isinstance(value, str) or not value.strip():
-            return False
-        normalized = (
-            unescape(value)
-            .replace("\\u0026", "&")
-            .replace("\\/", "/")
-            .casefold()
-        )
-        markers = (
-            "youtube.com",
-            "youtu.be",
-            "youtube-nocookie.com",
-            "<iframe",
-            "video/mp4",
-            ".m3u8",
-            ".mp4",
-        )
-        return any(marker in normalized for marker in markers)
-
-    for key in ("renderedHtml", "renderHtml", "html"):
-        if _looks_like_video_text(card.get(key)):
-            return True
-
-    for content in _iter_block_contents(card.get("children", [])):
-        for key in (
-            "renderHtml",
-            "html",
-            "src",
-            "url",
-            "videoUrl",
-            "assetUrl",
-            "embedUrl",
-            "youtubeUrl",
-            "sourceUrl",
-        ):
-            if _looks_like_video_text(content.get(key)):
-                return True
-
-    return False
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg create material clip failed: {stderr.decode()}")
 
 
-def _resolve_youtube_stream_url_sync(source_video: str) -> str:
-    """Resolve a YouTube page URL into a direct media stream URL."""
-    try:
-        import yt_dlp
-    except Exception as exc:
-        raise RuntimeError(
-            "yt-dlp is required to process YouTube material URLs"
-        ) from exc
-
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        # Prefer muxed AV streams to keep sound in a single ffmpeg input URL.
-        "format": "best[acodec!=none][vcodec!=none]/best",
-    }
-
-    def _is_storyboard_or_image(fmt: Dict[str, Any]) -> bool:
-        note = str(fmt.get("format_note") or "").casefold()
-        ext = str(fmt.get("ext") or "").casefold()
-        protocol = str(fmt.get("protocol") or "").casefold()
-        fmt_id = str(fmt.get("format_id") or "").casefold()
-
-        if "storyboard" in note:
-            return True
-        if ext in {"mhtml", "jpg", "jpeg", "png", "webp", "gif"}:
-            return True
-        if "mhtml" in protocol or "images" in protocol:
-            return True
-        if fmt_id.startswith("sb"):
-            return True
-        return False
-
-    def _is_video_format(fmt: Dict[str, Any]) -> bool:
-        if _is_storyboard_or_image(fmt):
-            return False
-        vcodec = str(fmt.get("vcodec") or "none").casefold()
-        return vcodec != "none"
-
-    def _has_audio(fmt: Dict[str, Any]) -> bool:
-        return str(fmt.get("acodec") or "none").casefold() != "none"
-
-    def _is_muxed_av_format(fmt: Dict[str, Any]) -> bool:
-        return _is_video_format(fmt) and _has_audio(fmt)
-
-    def _format_score(fmt: Dict[str, Any]) -> tuple:
-        has_audio = 1 if _has_audio(fmt) else 0
-        height = int(fmt.get("height") or 0)
-        fps = int(fmt.get("fps") or 0)
-        tbr = float(fmt.get("tbr") or 0.0)
-        prefers_mp4 = 1 if str(fmt.get("ext") or "").casefold() == "mp4" else 0
-        # Audio presence first, then quality dimensions.
-        return (has_audio, height, fps, tbr, prefers_mp4)
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(source_video, download=False)
-        if isinstance(info, dict) and info.get("entries"):
-            entries = info.get("entries") or []
-            info = entries[0] if entries else info
-
-        if isinstance(info, dict):
-            # yt-dlp usually puts selected formats here when format=... resolves cleanly.
-            requested = info.get("requested_formats")
-            if isinstance(requested, list) and requested:
-                candidates = [f for f in requested if isinstance(f, dict) and _is_muxed_av_format(f)]
-                if candidates:
-                    best = max(candidates, key=_format_score)
-                    direct = best.get("url")
-                    if isinstance(direct, str) and direct.strip():
-                        return direct.strip()
-
-            direct = info.get("url")
-            if isinstance(direct, str) and direct.strip():
-                return direct.strip()
-
-            muxed_formats = [
-                f
-                for f in (info.get("formats") or [])
-                if isinstance(f, dict) and _is_muxed_av_format(f)
-            ]
-            if muxed_formats:
-                best = max(muxed_formats, key=_format_score)
-                candidate = best.get("url")
-                if isinstance(candidate, str) and candidate.strip():
-                    return candidate.strip()
-
-            video_only_formats = [
-                f
-                for f in (info.get("formats") or [])
-                if isinstance(f, dict) and _is_video_format(f)
-            ]
-            if video_only_formats:
-                best = max(video_only_formats, key=_format_score)
-                candidate = best.get("url")
-                if isinstance(candidate, str) and candidate.strip():
-                    return candidate.strip()
-
-            # Final fallback if metadata is atypical.
-            for f in info.get("formats") or []:
-                candidate = f.get("url")
-                if isinstance(candidate, str) and candidate.strip():
-                    return candidate.strip()
-
-    raise RuntimeError("Could not resolve direct stream URL from YouTube material")
-
-
-async def _resolve_material_source_for_ffmpeg(source_video: str) -> str:
-    """Return an ffmpeg-compatible source for material video input."""
-    source = str(source_video or "").strip()
-    if not source:
-        raise RuntimeError("Empty material video source")
-
-    if _is_youtube_url(source):
-        logger.info("Resolving YouTube material URL for ffmpeg input")
-        return await asyncio.to_thread(_resolve_youtube_stream_url_sync, source)
-
-    return source
-
-
-async def _concat_videos(video_paths: List[str], output_path: str) -> str:
-    """Concatenate multiple videos using ffmpeg."""
+async def _concat_videos(video_paths: list[str], output_path: str) -> None:
     if not video_paths:
-        raise ValueError("No videos to concatenate")
-    
+        raise ValueError("No clips to concat")
+
     if len(video_paths) == 1:
         shutil.copy(video_paths[0], output_path)
-        return output_path
-    
-    ffmpeg = _get_ffmpeg()
-    ffmpeg_threads = _get_ffmpeg_threads()
-    concat_start = time.perf_counter()
-    
-    output_dir = Path(output_path).parent
-    concat_file = output_dir / f"concat_{Path(output_path).stem}_{uuid.uuid4().hex}.txt"
-    with open(concat_file, "w", encoding="utf-8") as f:
-        for vp in video_paths:
-            f.write(f"file '{Path(vp).resolve().as_posix()}'\n")
-    
-    try:
-        # Fast path: input clips are already normalized, so stream copy avoids re-encode.
-        fast_cmd = [
-            ffmpeg, "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-c", "copy",
-        ]
-        if bool(getattr(config, "CONCAT_FASTSTART_ON_COPY", False)):
-            fast_cmd.extend(["-movflags", "+faststart"])
-        fast_cmd.extend([
-            "-loglevel", "error",
-            output_path,
-        ])
+        return
 
-        fast_start = time.perf_counter()
+    ffmpeg = _find_binary("ffmpeg")
+    concat_file = Path(output_path).with_suffix(".concat.txt")
+
+    with open(concat_file, "w", encoding="utf-8") as fp:
+        for clip in video_paths:
+            fp.write(f"file '{Path(clip).resolve().as_posix()}'\n")
+
+    try:
+        copy_cmd = [
+            ffmpeg,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-c",
+            "copy",
+            "-loglevel",
+            "error",
+            output_path,
+        ]
         proc = await asyncio.create_subprocess_exec(
-            *fast_cmd,
+            *copy_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await proc.communicate()
         if proc.returncode == 0:
-            logger.info(
-                "Concat finished via stream copy in %.2fs (total concat stage %.2fs)",
-                time.perf_counter() - fast_start,
-                time.perf_counter() - concat_start,
-            )
-            return output_path
+            return
 
-        logger.warning(
-            "Fast concat copy failed after %.2fs, falling back to re-encode: %s",
-            time.perf_counter() - fast_start,
-            stderr.decode().strip(),
-        )
-
-        if not bool(getattr(config, "CONCAT_ALLOW_REENCODE_FALLBACK", True)):
-            raise RuntimeError(
-                "Fast concat copy failed and re-encode fallback is disabled by CONCAT_ALLOW_REENCODE_FALLBACK=false"
-            )
-
-        # Compatibility fallback: re-encode to guarantee successful merge.
-        fallback_preset = str(getattr(config, "CONCAT_FALLBACK_PRESET", "ultrafast") or "ultrafast").strip()
+        logger.warning("Concat copy failed, fallback re-encode: %s", stderr.decode().strip())
         safe_cmd = [
-            ffmpeg, "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-            "-threads", ffmpeg_threads,
-            "-c:v", "libx264",
-            "-preset", fallback_preset,
-            "-tune", "zerolatency",
-            "-x264-params", "rc-lookahead=0:sync-lookahead=0:bframes=0",
-            "-r", "30",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-ac", "2",
-            "-ar", "48000",
-            "-af", "aresample=async=1:first_pts=0",
-            "-movflags", "+faststart",
-            "-loglevel", "error",
+            ffmpeg,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-threads",
+            _ffmpeg_threads(),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-loglevel",
+            "error",
             output_path,
         ]
-
-        safe_start = time.perf_counter()
         proc = await asyncio.create_subprocess_exec(
             *safe_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -924,350 +464,266 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg concat failed: {stderr.decode()}")
-
-        logger.info(
-            "Concat finished via re-encode in %.2fs (total concat stage %.2fs)",
-            time.perf_counter() - safe_start,
-            time.perf_counter() - concat_start,
-        )
-
-        return output_path
     finally:
         concat_file.unlink(missing_ok=True)
 
 
-async def _process_card(
-    card: Dict[str, Any],
-    card_num: int,
-    tmp_dir: Path,
-    render_semaphore: asyncio.Semaphore,
-    tts_semaphore: asyncio.Semaphore,
-    ffmpeg_semaphore: asyncio.Semaphore,
-) -> Dict[str, Any] | None:
-    """
-    Process a single CARD: screenshot + TTS + create video.
-    Returns processed clip metadata.
-    """
-    interaction = _extract_interaction_payload(card)
-
-    if interaction and interaction.get("type") in {"quiz", "flashcard", "fill_blank"}:
-        # Interactive cards are handled by FE via pause/interactions, not rendered into video.
-        return {
-            "card_num": card_num,
-            "video_path": None,
-            "interaction": interaction,
-        }
-
-    material_video = _extract_video_material(card)
-    if material_video:
-        video_path = str(tmp_dir / f"slide_{card_num}.mp4")
-        async with ffmpeg_semaphore:
-            await _create_video_clip_from_material(
-                source_video=material_video["src"],
-                output_path=video_path,
-                start_time=material_video.get("start_time"),
-                end_time=material_video.get("end_time"),
-            )
-        return {
-            "card_num": card_num,
-            "video_path": video_path,
-            "interaction": interaction,
-        }
-
-    # If this card is intended to contain a video, avoid silently falling back to screenshot.
-    if _card_has_video_intent(card) and not getattr(config, "VIDEO_SCREENSHOT_FALLBACK", False):
-        raise RuntimeError(
-            f"Card {card_num} looks like a video card, but no playable source URL could be resolved"
-        )
-
-    # Get narration text
-    narration = _extract_narration_from_card(card)
-    if not narration.strip():
-        logger.warning("Card %d has no text, skipping", card_num)
-        return {
-            "card_num": card_num,
-            "video_path": None,
-            "interaction": interaction,
-        }
-    
-    # Paths
-    image_path = str(tmp_dir / f"slide_{card_num}.png")
-    audio_path = str(tmp_dir / f"slide_{card_num}.mp3")
-    video_path = str(tmp_dir / f"slide_{card_num}.mp4")
-    
-    async def _render_one() -> None:
-        async with render_semaphore:
-            await render_slide_async(card, image_path)
-
-    async def _tts_one() -> None:
-        async with tts_semaphore:
-            await generate_audio_async(narration, audio_path)
-
-    # Parallel per card, but each stage is globally throttled.
-    await asyncio.gather(_render_one(), _tts_one())
-    
-    # Create video from image + audio
-    async with ffmpeg_semaphore:
-        await _create_slide_video(image_path, audio_path, video_path)
-    
-    return {
-        "card_num": card_num,
-        "video_path": video_path,
-        "interaction": interaction,
-    }
-
-async def _get_video_duration_limited(video_path: str, semaphore: asyncio.Semaphore) -> float:
-    """Get duration while throttling ffprobe process fan-out."""
-    async with semaphore:
-        return await _get_video_duration(video_path)
-
-
 async def _get_video_duration(video_path: str) -> float:
-    """Get video duration using ffprobe."""
     try:
         ffprobe = _find_binary("ffprobe")
     except RuntimeError:
         return 0.0
-    
+
     cmd = [
         ffprobe,
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        video_path,
     ]
-    
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     stdout, _ = await proc.communicate()
-    
     try:
         return float(stdout.decode().strip())
     except ValueError:
         return 0.0
 
 
+async def _get_video_duration_limited(path: str, semaphore: asyncio.Semaphore) -> float:
+    async with semaphore:
+        return await _get_video_duration(path)
+
+
+def _build_gcs_uri(bucket: str, blob_name: str) -> str:
+    return f"gs://{bucket}/{blob_name}"
+
+
+def _upload_video_to_gcs(local_path: str, request_id: str) -> str | None:
+    bucket_name = (config.GCS_BUCKET_NAME or "").strip()
+    if not bucket_name:
+        return None
+
+    prefix = str(config.VIDEO_GCS_PREFIX or "generated_videos").strip("/")
+    blob_name = f"{prefix}/{request_id}.mp4" if prefix else f"{request_id}.mp4"
+
+    from google.cloud import storage
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(local_path, content_type="video/mp4")
+
+    return _build_gcs_uri(bucket_name, blob_name)
+
+
+async def _process_card(
+    card: dict,
+    card_num: int,
+    tmp_dir: Path,
+    render_sem: asyncio.Semaphore,
+    tts_sem: asyncio.Semaphore,
+    ffmpeg_sem: asyncio.Semaphore,
+) -> dict:
+    """Process one card by exactly one of 3 branches."""
+    interaction = _extract_interaction_payload(card)
+    if interaction and interaction.get("type") in {"quiz", "flashcard", "fill_blank"}:
+        # Branch 1: interactive card -> metadata only.
+        return {
+            "card_num": card_num,
+            "video_path": None,
+            "interaction": interaction,
+        }
+
+    material = _extract_video_source(card)
+    if material:
+        # Branch 2: card with video block -> normalize clip.
+        out = str(tmp_dir / f"slide_{card_num}.mp4")
+        async with ffmpeg_sem:
+            await _create_material_clip(
+                source_video=material["src"],
+                output_path=out,
+                start_time=material.get("start"),
+                end_time=material.get("end"),
+            )
+        return {
+            "card_num": card_num,
+            "video_path": out,
+            "interaction": interaction,
+        }
+
+    # Branch 3: normal card -> render + tts in parallel -> slide clip.
+    narration = _extract_narration(card)
+    if not narration.strip():
+        return {
+            "card_num": card_num,
+            "video_path": None,
+            "interaction": interaction,
+        }
+
+    image_path = str(tmp_dir / f"slide_{card_num}.png")
+    audio_path = str(tmp_dir / f"slide_{card_num}.mp3")
+    video_path = str(tmp_dir / f"slide_{card_num}.mp4")
+
+    async def do_render():
+        async with render_sem:
+            await render_slide_async(card, image_path)
+
+    async def do_tts():
+        async with tts_sem:
+            await generate_audio_async(narration, audio_path)
+
+    await asyncio.gather(do_render(), do_tts())
+
+    async with ffmpeg_sem:
+        await _create_slide_clip(image_path, audio_path, video_path)
+
+    return {
+        "card_num": card_num,
+        "video_path": video_path,
+        "interaction": interaction,
+    }
+
+
 async def generate_video_async(
     lesson_data: dict,
-    request_id: str = None,
+    request_id: str | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict:
-    """
-    Async video generation pipeline.
-    
-    Args:
-        lesson_data: Lesson JSON from text.md (supports API response format)
-        request_id: Optional correlation ID for tracking
-
-    Returns:
-        dict with video_url, duration, and interactions metadata.
-    """
+    """Generate final lesson video and metadata."""
     request_id = request_id or uuid.uuid4().hex[:12]
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"vidgen_{request_id}_"))
-    logger.info("Pipeline started [%s] tmp=%s", request_id, tmp_dir)
 
     try:
-        await _emit_progress(
-            progress_callback,
-            step="extracting_cards",
-            progress=10,
-            detail="Resolving lesson payload",
-        )
+        await _emit_progress(progress_callback, "extracting_cards", 10, "Resolving lesson payload")
 
-        # Extract lesson data from API response format
         lesson = extract_lesson_data(lesson_data)
-        cards = lesson.get("cards", [])
-        
+        cards = list(lesson.get("cards") or [])
         if not cards:
-            raise ValueError("No cards found in the input JSON.")
+            raise ValueError("No cards found in lesson payload")
 
-        logger.info("Processing %d card(s)...", len(cards))
         await _emit_progress(
             progress_callback,
-            step="rendering_slides",
-            progress=20,
-            detail=f"Rendering {len(cards)} slide(s)",
+            "processing_cards",
+            15,
+            f"Processing {len(cards)} card(s)",
         )
 
-        # Process cards in bounded parallelism to protect worker resources.
-        max_concurrency = max(1, int(getattr(config, "MAX_SLIDE_CONCURRENCY", 4)))
-        render_concurrency = max(1, int(getattr(config, "RENDER_CONCURRENCY", 2)))
-        tts_concurrency = max(1, int(getattr(config, "TTS_CONCURRENCY", 4)))
-        ffmpeg_concurrency = max(1, int(getattr(config, "FFMPEG_CONCURRENCY", 1)))
-        probe_concurrency = max(1, int(getattr(config, "PROBE_CONCURRENCY", 2)))
+        max_workers = max(1, int(config.MAX_SLIDE_CONCURRENCY))
+        render_sem = asyncio.Semaphore(max(1, int(config.RENDER_CONCURRENCY)))
+        tts_sem = asyncio.Semaphore(max(1, int(config.TTS_CONCURRENCY)))
+        ffmpeg_sem = asyncio.Semaphore(max(1, int(config.FFMPEG_CONCURRENCY)))
+        probe_sem = asyncio.Semaphore(max(1, int(config.PROBE_CONCURRENCY)))
 
-        render_semaphore = asyncio.Semaphore(render_concurrency)
-        tts_semaphore = asyncio.Semaphore(tts_concurrency)
-        ffmpeg_semaphore = asyncio.Semaphore(ffmpeg_concurrency)
-        probe_semaphore = asyncio.Semaphore(probe_concurrency)
+        queue: asyncio.Queue[int | None] = asyncio.Queue()
+        for idx in range(len(cards)):
+            queue.put_nowait(idx)
+        for _ in range(max_workers):
+            queue.put_nowait(None)
 
-        processed_cards: List[Dict[str, Any]] = []
-        total_cards = len(cards)
-        completed_cards = 0
+        results: list[dict] = []
+        results_q: asyncio.Queue[dict | None] = asyncio.Queue()
 
-        card_queue: asyncio.Queue[int | None] = asyncio.Queue()
-        for idx in range(total_cards):
-            card_queue.put_nowait(idx)
-        for _ in range(max_concurrency):
-            card_queue.put_nowait(None)
-
-        results_queue: asyncio.Queue[Dict[str, Any] | None] = asyncio.Queue()
-
-        async def _worker() -> None:
+        async def worker() -> None:
             while True:
-                card_index = await card_queue.get()
-                if card_index is None:
+                idx = await queue.get()
+                if idx is None:
                     return
+                card_num = idx + 1
+                card = cards[idx]
+                result = await _process_card(card, card_num, tmp_dir, render_sem, tts_sem, ffmpeg_sem)
+                await results_q.put(result)
+                cards[idx] = None
 
-                card_num = card_index + 1
-                card_payload = cards[card_index]
-                try:
-                    result = await _process_card(
-                        card_payload,
-                        card_num,
-                        tmp_dir,
-                        render_semaphore,
-                        tts_semaphore,
-                        ffmpeg_semaphore,
-                    )
-                    await results_queue.put(result)
-                finally:
-                    # Release large HTML payloads as soon as each card is processed.
-                    cards[card_index] = None
+        workers = [asyncio.create_task(worker()) for _ in range(max_workers)]
 
-        workers = [asyncio.create_task(_worker()) for _ in range(max_concurrency)]
-        try:
-            for _ in range(total_cards):
-                item = await results_queue.get()
-                completed_cards += 1
-                if item:
-                    processed_cards.append(item)
+        for done_count in range(1, len(cards) + 1):
+            item = await results_q.get()
+            if item:
+                results.append(item)
+            progress = min(75, 15 + int((done_count / len(cards)) * 60))
+            await _emit_progress(
+                progress_callback,
+                "processing_cards",
+                progress,
+                f"Completed {done_count}/{len(cards)} card(s)",
+            )
 
-                render_progress = 20 + int((completed_cards / total_cards) * 50)
-                await _emit_progress(
-                    progress_callback,
-                    step="rendering_slides",
-                    progress=min(render_progress, 70),
-                    detail=f"Completed {completed_cards}/{total_cards} slide(s)",
-                )
-        except Exception:
-            # Stop workers quickly so they do not continue after pipeline failure.
-            for task in workers:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*workers, return_exceptions=True)
-            raise
-        else:
-            await asyncio.gather(*workers)
-        
-        # Filter out skipped cards and restore original slide order.
-        processed_cards = [item for item in processed_cards if item]
-        processed_cards.sort(key=lambda item: int(item.get("card_num") or 0))
-        video_paths = [item["video_path"] for item in processed_cards if item.get("video_path")]
-        
+        await asyncio.gather(*workers)
+
+        results.sort(key=lambda x: int(x.get("card_num") or 0))
+        video_paths = [r["video_path"] for r in results if r.get("video_path")]
         if not video_paths:
-            raise ValueError("No valid slides to render.")
+            raise ValueError("No video clips generated")
 
-        # Concatenate all slide videos
+        await _emit_progress(progress_callback, "concatenating_video", 80, "Concatenating clips")
+
         output_filename = f"{request_id}.mp4"
         output_path = str(OUTPUT_DIR / output_filename)
-        
-        logger.info("Concatenating %d videos...", len(video_paths))
-        await _emit_progress(
-            progress_callback,
-            step="concatenating_video",
-            progress=80,
-            detail="Merging slide clips",
-        )
         await _concat_videos(video_paths, output_path)
 
-        # Build timing map for FE pause/overlay interactions
-        await _emit_progress(
-            progress_callback,
-            step="building_timeline",
-            progress=88,
-            detail="Calculating interaction timeline",
-        )
-        duration_tasks: List[tuple[Dict[str, Any], asyncio.Task[float]]] = []
-        for item in processed_cards:
-            video_path = item.get("video_path")
-            if video_path:
-                duration_tasks.append(
-                    (
-                        item,
-                        asyncio.create_task(
-                            _get_video_duration_limited(video_path, probe_semaphore)
-                        ),
-                    )
+        await _emit_progress(progress_callback, "building_timeline", 88, "Building interactions timeline")
+
+        duration_jobs: list[tuple[dict, asyncio.Task[float]]] = []
+        for item in results:
+            clip = item.get("video_path")
+            if clip:
+                duration_jobs.append(
+                    (item, asyncio.create_task(_get_video_duration_limited(clip, probe_sem)))
                 )
             else:
                 item["clip_duration"] = 0.0
 
-        if duration_tasks:
-            clip_durations = await asyncio.gather(*[task for _, task in duration_tasks])
-            for (item, _), clip_duration in zip(duration_tasks, clip_durations):
-                item["clip_duration"] = clip_duration
+        if duration_jobs:
+            durations = await asyncio.gather(*[job for _, job in duration_jobs])
+            for (item, _), duration in zip(duration_jobs, durations):
+                item["clip_duration"] = float(duration or 0.0)
 
-        timeline_cursor = 0.0
-        interactions: List[Dict[str, Any]] = []
-        pause_points: List[float] = []
-        interaction_index_by_base_pause: Dict[float, int] = {}
-        for slide_index, item in enumerate(processed_cards, start=1):
+        cursor = 0.0
+        interactions: list[dict] = []
+        pause_points: list[float] = []
+        for slide_index, item in enumerate(results, start=1):
             clip_duration = float(item.get("clip_duration") or 0.0)
-            start_time = timeline_cursor
+            start_time = cursor
             end_time = start_time + clip_duration
             if clip_duration > 0:
-                timeline_cursor = end_time
+                cursor = end_time
 
             interaction = item.get("interaction")
             if interaction:
-                base_pause_time = round(end_time, 3)
-                same_time_index = interaction_index_by_base_pause.get(base_pause_time, 0)
-                interaction_index_by_base_pause[base_pause_time] = same_time_index + 1
-
-                # Avoid identical pause times when multiple interactive cards are consecutive.
-                pause_time = round(base_pause_time + (same_time_index * 0.001), 3)
-                interactions.append({
-                    "type": interaction["type"],
-                    "slide_index": slide_index,
-                    "card_index": item["card_num"],
-                    "start_time": round(start_time, 3),
-                    "end_time": round(end_time, 3),
-                    "pause_time": pause_time,
-                    "payload": {k: v for k, v in interaction.items() if k != "type"},
-                })
+                pause_time = round(end_time, 3)
+                interactions.append(
+                    {
+                        "type": interaction["type"],
+                        "slide_index": slide_index,
+                        "card_index": item["card_num"],
+                        "start_time": round(start_time, 3),
+                        "end_time": round(end_time, 3),
+                        "pause_time": pause_time,
+                        "payload": {k: v for k, v in interaction.items() if k != "type"},
+                    }
+                )
                 pause_points.append(pause_time)
 
-        # Get final duration
         duration = await _get_video_duration(output_path)
-        await _emit_progress(
-            progress_callback,
-            step="uploading_video",
-            progress=95,
-            detail="Uploading output video",
-        )
+
+        await _emit_progress(progress_callback, "uploading_video", 95, "Uploading final video")
 
         local_video_url = f"{config.VIDEO_BASE_URL}/{output_filename}"
-        video_gcs_uri = await asyncio.to_thread(
-            _upload_video_to_gcs,
-            output_path,
-            request_id,
-        )
-        if video_gcs_uri and getattr(config, "VIDEO_RETURN_GCS_URI", True):
-            video_url = video_gcs_uri
+        video_gcs_uri = await asyncio.to_thread(_upload_video_to_gcs, output_path, request_id)
+        if video_gcs_uri and config.VIDEO_RETURN_GCS_URI:
+            final_url = video_gcs_uri
         else:
-            video_url = local_video_url
-
-        logger.info(
-            "Pipeline finished [%s] → %s (%.1fs)",
-            request_id, video_url, duration,
-        )
+            final_url = local_video_url
 
         return {
-            "video_url": video_url,
+            "video_url": final_url,
             "video_gcs_uri": video_gcs_uri,
             "video_local_url": local_video_url,
             "duration": duration,
@@ -1276,23 +732,18 @@ async def generate_video_async(
             "pause_points": pause_points,
         }
 
-    except Exception:
-        logger.exception("Pipeline failed [%s]", request_id)
-        raise
-
     finally:
-        if getattr(config, "CLEANUP_BROWSER_EACH_REQUEST", False):
+        if config.CLEANUP_BROWSER_EACH_REQUEST:
             try:
                 await cleanup_browser()
             except Exception:
-                logger.warning("Could not cleanup browser", exc_info=True)
+                logger.warning("Browser cleanup failed", exc_info=True)
 
         try:
             shutil.rmtree(tmp_dir, ignore_errors=True)
         except Exception:
-            logger.warning("Could not clean temp dir %s", tmp_dir, exc_info=True)
+            logger.warning("Temp cleanup failed: %s", tmp_dir, exc_info=True)
 
 
-def generate_video(lesson_data: dict, request_id: str = None) -> dict:
-    """Sync wrapper for generate_video_async."""
-    return asyncio.run(generate_video_async(lesson_data, request_id))
+def generate_video(lesson_data: dict, request_id: str | None = None) -> dict:
+    return asyncio.run(generate_video_async(lesson_data, request_id=request_id))

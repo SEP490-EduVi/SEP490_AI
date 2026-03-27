@@ -1,12 +1,4 @@
-"""
-RabbitMQ consumer for video generation requests — async (aio_pika).
-
-Listens on video.generation.requests queue, processes video generation,
-and publishes results to pipeline.results queue.
-
-Supports concurrent processing: set PREFETCH_COUNT > 1 and scale
-replicas in docker-compose to handle multiple users simultaneously.
-"""
+"""RabbitMQ consumer for video generation requests."""
 
 import asyncio
 import json
@@ -21,124 +13,24 @@ from .pipeline import generate_video_async
 from .slide_payload_extractor import load_json_document
 from .utils import extract_lesson_data
 
-# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     stream=sys.stdout,
 )
 logger = logging.getLogger("video_generator")
 
-
-_PROGRESS_DEDUP_WINDOW_SEC = float(getattr(config, "PROGRESS_DEDUP_WINDOW_SEC", 2.0))
-_recent_progress_events: dict[tuple, float] = {}
-_recent_progress_events_lock = asyncio.Lock()
-_EVENT_ID_DEDUP_WINDOW_SEC = float(getattr(config, "EVENT_ID_DEDUP_WINDOW_SEC", 60.0))
-_recent_event_ids: dict[str, float] = {}
-_recent_event_ids_lock = asyncio.Lock()
-_terminal_tasks_published: dict[str, float] = {}
-_terminal_tasks_published_lock = asyncio.Lock()
-_task_published_events: dict[str, set[str]] = {}
-_task_published_events_lock = asyncio.Lock()
-
-
-async def _is_duplicate_progress_event(signature: tuple) -> bool:
-    """Return True when same progress event was published very recently."""
-    now = time.monotonic()
-    async with _recent_progress_events_lock:
-        # Periodic lightweight cleanup to keep memory bounded.
-        if _recent_progress_events:
-            expired = [
-                key
-                for key, ts in _recent_progress_events.items()
-                if (now - ts) > (_PROGRESS_DEDUP_WINDOW_SEC * 2)
-            ]
-            for key in expired:
-                _recent_progress_events.pop(key, None)
-
-        last_ts = _recent_progress_events.get(signature)
-        if last_ts is not None and (now - last_ts) <= _PROGRESS_DEDUP_WINDOW_SEC:
-            return True
-
-        _recent_progress_events[signature] = now
-        return False
-
-
-async def _is_duplicate_event_id(event_id: str, task_id: str, status: str) -> bool:
-    """Return True when same logical event was already published recently."""
-    now = time.monotonic()
-
-    async with _recent_event_ids_lock:
-        if _recent_event_ids:
-            expired = [
-                key
-                for key, ts in _recent_event_ids.items()
-                if (now - ts) > _EVENT_ID_DEDUP_WINDOW_SEC
-            ]
-            for key in expired:
-                _recent_event_ids.pop(key, None)
-
-        if event_id in _recent_event_ids:
-            return True
-
-    if status in {"completed", "failed"}:
-        async with _terminal_tasks_published_lock:
-            if _terminal_tasks_published:
-                expired = [
-                    key
-                    for key, ts in _terminal_tasks_published.items()
-                    if (now - ts) > (_EVENT_ID_DEDUP_WINDOW_SEC * 10)
-                ]
-                for key in expired:
-                    _terminal_tasks_published.pop(key, None)
-
-            if task_id in _terminal_tasks_published:
-                return True
-
-    return False
-
-
-async def _mark_event_id_published(event_id: str, task_id: str, status: str) -> None:
-    """Record logical event and terminal publication markers."""
-    now = time.monotonic()
-    async with _recent_event_ids_lock:
-        _recent_event_ids[event_id] = now
-
-    if status in {"completed", "failed"}:
-        async with _terminal_tasks_published_lock:
-            _terminal_tasks_published[task_id] = now
-
-
-async def _should_publish_task_event(task_id: str, event_id: str, status: str) -> bool:
-    """Return False if this exact task event has already been published."""
-    now = time.monotonic()
-
-    async with _task_published_events_lock:
-        # Periodic cleanup for finished tasks to keep memory bounded.
-        if _terminal_tasks_published:
-            expired = [
-                key
-                for key, ts in _terminal_tasks_published.items()
-                if (now - ts) > (_EVENT_ID_DEDUP_WINDOW_SEC * 10)
-            ]
-            for key in expired:
-                _terminal_tasks_published.pop(key, None)
-                _task_published_events.pop(key, None)
-
-        published = _task_published_events.setdefault(task_id, set())
-        if event_id in published:
-            return False
-
-        published.add(event_id)
-        if status in {"completed", "failed"}:
-            _terminal_tasks_published[task_id] = now
-
-    return True
+_active_tasks: set[str] = set()
+_active_tasks_lock = asyncio.Lock()
+_recent_task_claims: dict[str, float] = {}
+_recent_task_claims_lock = asyncio.Lock()
+_published_event_ids: dict[str, set[str]] = {}
+_published_event_ids_lock = asyncio.Lock()
 
 
 async def get_connection() -> aio_pika.abc.AbstractRobustConnection:
-    """Create a robust (auto-reconnecting) async RabbitMQ connection."""
+    """Create robust RabbitMQ connection with auto-reconnect."""
     return await aio_pika.connect_robust(
         host=config.RABBITMQ_HOST,
         port=config.RABBITMQ_PORT,
@@ -150,14 +42,14 @@ async def get_connection() -> aio_pika.abc.AbstractRobustConnection:
 
 async def publish_result(
     channel: aio_pika.abc.AbstractChannel,
-    result: dict,
-    correlation_id: str | None = None,
-    persistent: bool = True,
+    payload: dict,
+    correlation_id: str | None,
+    persistent: bool,
 ) -> None:
-    """Publish a result message to the results queue."""
+    """Publish a JSON message to pipeline.results."""
     await channel.default_exchange.publish(
         aio_pika.Message(
-            body=json.dumps(result, ensure_ascii=False).encode(),
+            body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             delivery_mode=(
                 aio_pika.DeliveryMode.PERSISTENT
                 if persistent
@@ -168,12 +60,10 @@ async def publish_result(
         ),
         routing_key=config.RESULT_QUEUE,
     )
-    logger.info("Published result to %s (correlation_id=%s)",
-                config.RESULT_QUEUE, correlation_id)
 
 
-def _extract_lesson_payload(message: dict):
-    """Extract lesson payload from direct JSON data or gs:// source URI."""
+def _extract_lesson_payload(message: dict) -> dict:
+    """Extract lesson payload from inline fields or gs:// source."""
     direct_payload = (
         message.get("lessonData")
         or message.get("lesson_data")
@@ -203,81 +93,79 @@ def _extract_lesson_payload(message: dict):
 
 
 def _validate_cards_present(lesson_payload: dict) -> None:
-    """Validate that resolved lesson payload contains cards for rendering."""
+    """Validate resolved payload contains cards list."""
     lesson = extract_lesson_data(lesson_payload)
     cards = lesson.get("cards") if isinstance(lesson, dict) else None
     if isinstance(cards, list) and cards:
         return
 
-    top_keys = sorted(list(lesson_payload.keys())) if isinstance(lesson_payload, dict) else []
-    raise ValueError(
-        "No cards found in video request payload. "
-        "Expected one of: lessonData.cards, slideEditedDocument.cards, result.slideEditedDocument.cards, "
-        "or lessonDataGcsUri/slideDataGcsUri pointing to a JSON slide document. "
-        f"Received keys: {top_keys}"
-    )
+    raise ValueError("No cards found in payload.")
+
+
+async def _try_claim_task(task_id: str) -> bool:
+    """Claim task id to avoid duplicate processing of same message."""
+    if not config.TASK_IDEMPOTENCY_ENABLED:
+        return True
+
+    now = time.monotonic()
+    window = max(1.0, float(config.TASK_IDEMPOTENCY_WINDOW_SEC))
+
+    async with _recent_task_claims_lock:
+        expired = [
+            key
+            for key, ts in _recent_task_claims.items()
+            if (now - ts) > window
+        ]
+        for key in expired:
+            _recent_task_claims.pop(key, None)
+
+        last = _recent_task_claims.get(task_id)
+        if last is not None and (now - last) <= window:
+            return False
+
+    async with _active_tasks_lock:
+        if task_id in _active_tasks:
+            return False
+        _active_tasks.add(task_id)
+
+    async with _recent_task_claims_lock:
+        _recent_task_claims[task_id] = now
+
+    return True
+
+
+async def _release_task(task_id: str) -> None:
+    """Release in-flight task lock."""
+    if not config.TASK_IDEMPOTENCY_ENABLED:
+        return
+
+    async with _active_tasks_lock:
+        _active_tasks.discard(task_id)
 
 
 async def _publish_progress(
     channel: aio_pika.abc.AbstractChannel,
     task_id: str,
-    user_id: str,
+    user_id,
     product_id,
-    request_id: str | None,
+    request_id,
     status: str,
     step: str,
     progress: int,
-    correlation_id: str | None = None,
+    correlation_id: str | None,
     detail: str | None = None,
     result: dict | None = None,
     error: str | None = None,
 ) -> None:
-    """Publish standard pipeline progress/result message."""
-    result_signature = None
-    if result is not None:
-        try:
-            result_signature = json.dumps(result, ensure_ascii=False, sort_keys=True)
-        except TypeError:
-            result_signature = str(result)
-
-    event_signature = (
-        task_id,
-        user_id,
-        product_id,
-        request_id,
-        status,
-        step,
-        int(progress),
-        detail,
-        error,
-        result_signature,
-    )
-
+    """Publish progress/result event with per-task dedup."""
     event_id = f"{task_id}:{status}:{step}:{int(progress)}"
-    if not await _should_publish_task_event(task_id, event_id, status):
-        logger.warning(
-            "Suppressed duplicate task event task=%s event_id=%s",
-            task_id,
-            event_id,
-        )
-        return
 
-    if await _is_duplicate_event_id(event_id, task_id, status):
-        logger.warning(
-            "Suppressed duplicate event_id task=%s event_id=%s",
-            task_id,
-            event_id,
-        )
-        return
-
-    if await _is_duplicate_progress_event(event_signature):
-        logger.warning(
-            "Suppressed duplicate progress event task=%s step=%s progress=%s",
-            task_id,
-            step,
-            progress,
-        )
-        return
+    async with _published_event_ids_lock:
+        seen = _published_event_ids.setdefault(task_id, set())
+        if event_id in seen:
+            logger.debug("Skip duplicate event_id=%s", event_id)
+            return
+        seen.add(event_id)
 
     payload = {
         "taskId": task_id,
@@ -287,56 +175,117 @@ async def _publish_progress(
         "eventId": event_id,
         "status": status,
         "step": step,
-        "progress": progress,
+        "progress": int(progress),
         "detail": detail,
         "result": result,
         "error": error,
     }
-    persistent = status != "processing" or bool(getattr(config, "PERSIST_PROCESSING_EVENTS", False))
+    persistent = status != "processing" or config.PERSIST_PROCESSING_EVENTS
     await publish_result(channel, payload, correlation_id, persistent=persistent)
-    await _mark_event_id_published(event_id, task_id, status)
+
+    if status in {"completed", "failed"}:
+        async with _published_event_ids_lock:
+            _published_event_ids.pop(task_id, None)
+
+
+async def _publish_failure(
+    channel: aio_pika.abc.AbstractChannel,
+    task_id: str,
+    user_id,
+    product_id,
+    request_id,
+    correlation_id: str,
+    error_type: str,
+    error_message: str,
+) -> None:
+    await _publish_progress(
+        channel=channel,
+        task_id=task_id,
+        user_id=user_id,
+        product_id=product_id,
+        request_id=request_id,
+        status="failed",
+        step="error",
+        progress=0,
+        correlation_id=correlation_id,
+        detail=error_type,
+        error=error_message,
+    )
 
 
 async def _on_message(
     message: aio_pika.abc.AbstractIncomingMessage,
     channel: aio_pika.abc.AbstractChannel,
 ) -> None:
-    """Handle a single video generation task from RabbitMQ."""
+    """Handle one request message from video.generation.requests."""
     correlation_id = message.correlation_id
-    task_id = correlation_id or f"msg_{message.message_id or id(message)}"
-    user_id = None
-    product_id = None
-    source_request_id = None
+    default_task_id = correlation_id or f"msg_{message.message_id or id(message)}"
 
     async with message.process(requeue=False):
-        logger.info("Received message [%s] (%d bytes)", task_id, len(message.body))
-        last_processing_event: tuple[str, int, str | None] | None = None
+        task_id = default_task_id
+        user_id = None
+        product_id = None
+        source_request_id = None
 
         try:
-            msg = json.loads(message.body.decode("utf-8"))
+            data = json.loads(message.body.decode("utf-8"))
 
-            task_id = str(msg.get("taskId") or msg.get("task_id") or task_id)
+            task_id = str(data.get("taskId") or data.get("task_id") or default_task_id)
             effective_correlation_id = correlation_id or task_id
-            user_id = msg.get("userId") or msg.get("user_id")
-            product_id = msg.get("productId") or msg.get("product_id")
-            source_request_id = msg.get("requestId") or msg.get("videoRequestId")
-            product_code = msg.get("productCode") or msg.get("product_code")
+            user_id = data.get("userId") or data.get("user_id")
+            product_id = data.get("productId") or data.get("product_id")
+            source_request_id = data.get("requestId") or data.get("videoRequestId")
+            product_code = data.get("productCode") or data.get("product_code")
 
-            logger.info(
-                "Processing video for task=%s user=%s product=%s productCode=%s",
-                task_id, user_id, product_id, product_code,
+            if not await _try_claim_task(task_id):
+                logger.warning("Skip duplicate task message task=%s", task_id)
+                return
+
+            await _publish_progress(
+                channel=channel,
+                task_id=task_id,
+                user_id=user_id,
+                product_id=product_id,
+                request_id=source_request_id,
+                status="processing",
+                step="started",
+                progress=0,
+                correlation_id=effective_correlation_id,
+                detail="Task received, starting video generation",
             )
 
-            async def _publish_processing(step: str, progress: int, detail: str | None = None) -> None:
-                nonlocal last_processing_event
-                event = (step, int(progress), detail)
-                if event == last_processing_event:
-                    logger.debug("Skip duplicate progress event task=%s event=%s", task_id, event)
-                    return
+            await _publish_progress(
+                channel=channel,
+                task_id=task_id,
+                user_id=user_id,
+                product_id=product_id,
+                request_id=source_request_id,
+                status="processing",
+                step="loading_payload",
+                progress=5,
+                correlation_id=effective_correlation_id,
+                detail="Loading lesson payload",
+            )
 
-                last_processing_event = event
+            lesson_payload = await asyncio.to_thread(_extract_lesson_payload, data)
+
+            await _publish_progress(
+                channel=channel,
+                task_id=task_id,
+                user_id=user_id,
+                product_id=product_id,
+                request_id=source_request_id,
+                status="processing",
+                step="validating_payload",
+                progress=8,
+                correlation_id=effective_correlation_id,
+                detail="Validating lesson structure",
+            )
+            _validate_cards_present(lesson_payload)
+
+            async def _pipeline_progress(step: str, progress: int, detail: str | None = None):
                 await _publish_progress(
-                    channel,
+                    channel=channel,
                     task_id=task_id,
                     user_id=user_id,
                     product_id=product_id,
@@ -348,36 +297,8 @@ async def _on_message(
                     detail=detail,
                 )
 
-            await _publish_processing(
-                step="started",
-                progress=0,
-                detail="Task received, starting video generation",
-            )
-
-            await _publish_processing(
-                step="loading_payload",
-                progress=5,
-                detail="Loading lesson payload",
-            )
-
-            # Load lesson payload (may be GCS URI or inline data)
-            lesson_data = await asyncio.to_thread(
-                _extract_lesson_payload, msg
-            )
-
-            await _publish_processing(
-                step="validating_payload",
-                progress=8,
-                detail="Validating lesson structure",
-            )
-            _validate_cards_present(lesson_data)
-
-            async def _pipeline_progress(step: str, progress: int, detail: str | None = None) -> None:
-                await _publish_processing(step=step, progress=progress, detail=detail)
-
-            # Run video pipeline in thread to avoid blocking event loop.
             result = await generate_video_async(
-                lesson_data,
+                lesson_payload,
                 request_id=task_id,
                 progress_callback=_pipeline_progress,
             )
@@ -391,13 +312,13 @@ async def _on_message(
                 "videoGcsUri": result.get("video_gcs_uri") or result["video_url"],
                 "video_gcs_uri": result.get("video_gcs_uri") or result["video_url"],
                 "videoLocalUrl": result.get("video_local_url"),
-                "duration": result["duration"],
+                "duration": result.get("duration", 0.0),
                 "interactions": result.get("interactions", []),
                 "pausePoints": result.get("pause_points", []),
             }
 
             await _publish_progress(
-                channel,
+                channel=channel,
                 task_id=task_id,
                 user_id=user_id,
                 product_id=product_id,
@@ -410,83 +331,79 @@ async def _on_message(
                 result=result_payload,
             )
 
-            logger.info("Successfully processed [%s]", task_id)
+            logger.info("Task completed: %s", task_id)
 
-        except json.JSONDecodeError as e:
-            logger.error("Invalid JSON in message [%s]: %s", task_id, e)
-            await _publish_failure(channel, task_id, user_id, product_id,
-                                   source_request_id, (correlation_id or task_id), str(e), "invalid_json")
-
-        except ValueError as e:
-            logger.error("Validation error [%s]: %s", task_id, e)
-            await _publish_failure(channel, task_id, user_id, product_id,
-                                   source_request_id, (correlation_id or task_id), str(e), "validation_error")
-
-        except Exception as e:
-            logger.exception("Processing failed [%s]", task_id)
-            await _publish_failure(channel, task_id, user_id, product_id,
-                                   source_request_id, (correlation_id or task_id),
-                                   f"{type(e).__name__}: {e}", "processing_error")
-
-async def _publish_failure(
-    channel: aio_pika.abc.AbstractChannel,
-    task_id: str,
-    user_id,
-    product_id,
-    source_request_id,
-    correlation_id,
-    error_msg: str,
-    error_type: str,
-) -> None:
-    await _publish_progress(
-        channel,
-        task_id=task_id,
-        user_id=user_id,
-        product_id=product_id,
-        request_id=source_request_id,
-        status="failed",
-        step="error",
-        progress=0,
-        correlation_id=correlation_id,
-        detail=error_type,
-        error=error_msg,
-    )
+        except json.JSONDecodeError as exc:
+            logger.error("Invalid JSON for task=%s: %s", task_id, exc)
+            await _publish_failure(
+                channel,
+                task_id,
+                user_id,
+                product_id,
+                source_request_id,
+                correlation_id or task_id,
+                "invalid_json",
+                str(exc),
+            )
+        except ValueError as exc:
+            logger.error("Validation error for task=%s: %s", task_id, exc)
+            await _publish_failure(
+                channel,
+                task_id,
+                user_id,
+                product_id,
+                source_request_id,
+                correlation_id or task_id,
+                "validation_error",
+                str(exc),
+            )
+        except Exception as exc:
+            logger.exception("Processing failed for task=%s", task_id)
+            await _publish_failure(
+                channel,
+                task_id,
+                user_id,
+                product_id,
+                source_request_id,
+                correlation_id or task_id,
+                "processing_error",
+                f"{type(exc).__name__}: {exc}",
+            )
+        finally:
+            await _release_task(task_id)
 
 
 async def start_consumer() -> None:
-    """Connect to RabbitMQ and start consuming (async, auto-reconnecting)."""
+    """Start RabbitMQ consumer with auto-reconnect + prefetch."""
     logger.info(
-        "Connecting to RabbitMQ at %s:%d ...",
-        config.RABBITMQ_HOST, config.RABBITMQ_PORT,
+        "Connecting RabbitMQ %s:%d ...",
+        config.RABBITMQ_HOST,
+        config.RABBITMQ_PORT,
     )
 
     connection = await get_connection()
     channel = await connection.channel()
-
-    # PREFETCH_COUNT controls max concurrent video jobs per container.
-    # Set to 1 (default) for single concurrent, or higher + scale replicas
-    # in docker-compose for true multi-user parallelism.
     await channel.set_qos(prefetch_count=config.PREFETCH_COUNT)
 
     await channel.declare_queue(config.REQUEST_QUEUE, durable=True)
     await channel.declare_queue(config.RESULT_QUEUE, durable=True)
 
     queue = await channel.get_queue(config.REQUEST_QUEUE)
-
-    logger.info(
-        "✓ Connected. Waiting for messages on '%s' (prefetch=%d) ...",
-        config.REQUEST_QUEUE, config.PREFETCH_COUNT,
-    )
-
     await queue.consume(lambda msg: _on_message(msg, channel))
 
+    logger.info(
+        "Listening queue=%s (prefetch=%d) -> publish=%s",
+        config.REQUEST_QUEUE,
+        config.PREFETCH_COUNT,
+        config.RESULT_QUEUE,
+    )
+
     try:
-        await asyncio.Future()  # run forever
+        await asyncio.Future()
     except asyncio.CancelledError:
-        logger.info("Shutting down consumer.")
+        logger.info("Consumer cancelled, closing connection")
         await connection.close()
 
 
 if __name__ == "__main__":
     asyncio.run(start_consumer())
-
