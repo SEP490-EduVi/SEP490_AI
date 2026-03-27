@@ -45,6 +45,22 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
+            set -e
             cd /opt/eduvi
-            docker compose pull video-generator
-            docker compose up -d video-generator
+            IMAGE="ghcr.io/${{ env.OWNER }}/video-generator:${{ github.sha }}"
+
+            # Pull immutable image for this commit and retag latest locally
+            # so existing compose config still resolves the newest build.
+            docker pull "$IMAGE"
+            docker tag "$IMAGE" "ghcr.io/${{ env.OWNER }}/video-generator:latest"
+
+            # Recreate service to ensure container uses the new image.
+            docker compose up -d --no-deps --force-recreate video-generator
+
+            # Verification: print running container + image digest used.
+            docker compose ps video-generator
+            CID=$(docker compose ps -q video-generator)
+            if [ -n "$CID" ]; then
+              docker inspect "$CID" --format 'running_image={{.Config.Image}} image_id={{.Image}}'
+              docker logs --tail 120 "$CID" | grep -E 'concat_mode=|Processing video for task=' || true
+            fi
