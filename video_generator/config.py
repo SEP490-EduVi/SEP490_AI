@@ -31,6 +31,9 @@ FFMPEG_CONCURRENCY = int(os.getenv("FFMPEG_CONCURRENCY", "1"))
 PROBE_CONCURRENCY = int(os.getenv("PROBE_CONCURRENCY", "1"))
 FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "1"))
 FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "ultrafast")
+VIDEO_FPS = int(os.getenv("VIDEO_FPS", "24"))
+VIDEO_WIDTH = int(os.getenv("VIDEO_WIDTH", "960"))
+VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "540"))
 
 # Reduce event spam to RabbitMQ during per-card processing.
 PROGRESS_STEP_GRANULARITY = int(os.getenv("PROGRESS_STEP_GRANULARITY", "10"))

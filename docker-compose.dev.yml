@@ -125,15 +125,27 @@ services:
       RABBITMQ_PORT: 5672
       RABBITMQ_USER: guest
       RABBITMQ_PASS: guest
-      # Concurrency: how many videos this container processes at once.
-      # Recommended: keep at 1 (CPU/RAM bound). Scale replicas instead.
+      # Low-CPU profile: keep per-container workload small, then scale replicas.
       PREFETCH_COUNT: ${VIDEO_PREFETCH_COUNT:-1}
+      MAX_SLIDE_CONCURRENCY: ${VIDEO_MAX_SLIDE_CONCURRENCY:-1}
+      RENDER_CONCURRENCY: ${VIDEO_RENDER_CONCURRENCY:-1}
+      TTS_CONCURRENCY: ${VIDEO_TTS_CONCURRENCY:-1}
+      FFMPEG_CONCURRENCY: ${VIDEO_FFMPEG_CONCURRENCY:-1}
+      PROBE_CONCURRENCY: ${VIDEO_PROBE_CONCURRENCY:-1}
+      FFMPEG_THREADS: ${VIDEO_FFMPEG_THREADS:-1}
+      FFMPEG_PRESET: ${VIDEO_FFMPEG_PRESET:-ultrafast}
+      VIDEO_FPS: ${VIDEO_FPS:-24}
+      VIDEO_WIDTH: ${VIDEO_WIDTH:-960}
+      VIDEO_HEIGHT: ${VIDEO_HEIGHT:-540}
+      PROGRESS_STEP_GRANULARITY: ${VIDEO_PROGRESS_STEP_GRANULARITY:-15}
+      PERSIST_PROCESSING_EVENTS: ${VIDEO_PERSIST_PROCESSING_EVENTS:-false}
       # Google Cloud
       GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
       VIDEO_GCS_PREFIX: ${VIDEO_GCS_PREFIX:-generated_videos}
       VIDEO_RETURN_GCS_URI: ${VIDEO_RETURN_GCS_URI:-true}
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+    cpus: ${VIDEO_GENERATOR_CPUS:-1.50}
     volumes:
       - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
       - ./videos:/app/videos

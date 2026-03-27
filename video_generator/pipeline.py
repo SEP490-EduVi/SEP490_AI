@@ -40,6 +40,21 @@ def _ffmpeg_preset() -> str:
     return preset or "ultrafast"
 
 
+def _video_fps() -> str:
+    fps = max(12, int(getattr(config, "VIDEO_FPS", 24)))
+    return str(fps)
+
+
+def _video_scale_filter() -> str:
+    width = max(320, int(getattr(config, "VIDEO_WIDTH", 960)))
+    height = max(180, int(getattr(config, "VIDEO_HEIGHT", 540)))
+    return (
+        f"fps={_video_fps()},"
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+    )
+
+
 async def _emit_progress(
     progress_callback: ProgressCallback | None,
     step: str,
@@ -293,13 +308,13 @@ async def _create_slide_clip(image_path: str, audio_path: str, output_path: str)
         "-loop",
         "1",
         "-framerate",
-        "30",
+        _video_fps(),
         "-i",
         image_path,
         "-i",
         audio_path,
         "-vf",
-        "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+        _video_scale_filter(),
         "-threads",
         _ffmpeg_threads(),
         "-c:v",
@@ -309,7 +324,7 @@ async def _create_slide_clip(image_path: str, audio_path: str, output_path: str)
         "-tune",
         "stillimage",
         "-r",
-        "30",
+        _video_fps(),
         "-c:a",
         "aac",
         "-ac",
@@ -359,7 +374,7 @@ async def _create_material_clip(
     cmd.extend(
         [
             "-vf",
-            "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+            _video_scale_filter(),
             "-threads",
             _ffmpeg_threads(),
             "-c:v",
@@ -367,7 +382,7 @@ async def _create_material_clip(
             "-preset",
             _ffmpeg_preset(),
             "-r",
-            "30",
+            _video_fps(),
             "-pix_fmt",
             "yuv420p",
             "-c:a",
