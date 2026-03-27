@@ -1116,7 +1116,7 @@ async def generate_video_async(
         )
         await _concat_videos(video_paths, output_path)
 
-        # Build timing map for FE pause/overlay interactions.
+        # Build timing map for FE pause/overlay interactions
         await _emit_progress(
             progress_callback,
             step="building_timeline",
