@@ -1123,17 +1123,6 @@ async def generate_video_async(
             progress=88,
             detail="Calculating interaction timeline",
         )
-<<<<<<< HEAD
-        video_items = [item for item in processed_cards if item.get("video_path")]
-        clip_durations = await asyncio.gather(
-            *[
-                _get_video_duration_limited(item["video_path"], probe_semaphore)
-                for item in video_items
-            ]
-        )
-        for item, clip_duration in zip(video_items, clip_durations):
-            item["clip_duration"] = clip_duration
-=======
         duration_tasks: List[tuple[Dict[str, Any], asyncio.Task[float]]] = []
         for item in processed_cards:
             video_path = item.get("video_path")
@@ -1153,7 +1142,6 @@ async def generate_video_async(
             clip_durations = await asyncio.gather(*[task for _, task in duration_tasks])
             for (item, _), clip_duration in zip(duration_tasks, clip_durations):
                 item["clip_duration"] = clip_duration
->>>>>>> dat_video_generation
 
         timeline_cursor = 0.0
         interactions: List[Dict[str, Any]] = []
