@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 import re
 import shutil
 import tempfile
@@ -34,6 +33,11 @@ def _find_binary(name: str) -> str:
 
 def _ffmpeg_threads() -> str:
     return str(max(1, int(getattr(config, "FFMPEG_THREADS", 1))))
+
+
+def _ffmpeg_preset() -> str:
+    preset = str(getattr(config, "FFMPEG_PRESET", "ultrafast") or "ultrafast").strip()
+    return preset or "ultrafast"
 
 
 async def _emit_progress(
@@ -301,7 +305,7 @@ async def _create_slide_clip(image_path: str, audio_path: str, output_path: str)
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        _ffmpeg_preset(),
         "-tune",
         "stillimage",
         "-r",
@@ -361,7 +365,7 @@ async def _create_material_clip(
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            _ffmpeg_preset(),
             "-r",
             "30",
             "-pix_fmt",
@@ -447,7 +451,7 @@ async def _concat_videos(video_paths: list[str], output_path: str) -> None:
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            _ffmpeg_preset(),
             "-c:a",
             "aac",
             "-movflags",
@@ -642,12 +646,24 @@ async def generate_video_async(
                 cards[idx] = None
 
         workers = [asyncio.create_task(worker()) for _ in range(max_workers)]
+        last_progress_sent = -1
+        progress_granularity = max(1, int(getattr(config, "PROGRESS_STEP_GRANULARITY", 10)))
 
         for done_count in range(1, len(cards) + 1):
             item = await results_q.get()
             if item:
                 results.append(item)
             progress = min(75, 15 + int((done_count / len(cards)) * 60))
+            is_last = done_count == len(cards)
+            should_emit = (
+                is_last
+                or last_progress_sent < 0
+                or progress >= (last_progress_sent + progress_granularity)
+            )
+            if not should_emit:
+                continue
+
+            last_progress_sent = progress
             await _emit_progress(
                 progress_callback,
                 "processing_cards",

@@ -24,12 +24,16 @@ TASK_IDEMPOTENCY_ENABLED = (
 TASK_IDEMPOTENCY_WINDOW_SEC = float(os.getenv("TASK_IDEMPOTENCY_WINDOW_SEC", "120"))
 
 # Pipeline concurrency
-MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "2"))
+MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "1"))
 RENDER_CONCURRENCY = int(os.getenv("RENDER_CONCURRENCY", "1"))
-TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "2"))
+TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "1"))
 FFMPEG_CONCURRENCY = int(os.getenv("FFMPEG_CONCURRENCY", "1"))
 PROBE_CONCURRENCY = int(os.getenv("PROBE_CONCURRENCY", "1"))
 FFMPEG_THREADS = int(os.getenv("FFMPEG_THREADS", "1"))
+FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "ultrafast")
+
+# Reduce event spam to RabbitMQ during per-card processing.
+PROGRESS_STEP_GRANULARITY = int(os.getenv("PROGRESS_STEP_GRANULARITY", "10"))
 
 # Media output
 OUTPUT_DIR = os.getenv("VIDEO_OUTPUT_DIR", "/app/videos")
