@@ -409,6 +409,7 @@ async def _create_slide_video(
         "-i", image_path,
         "-i", audio_path,
         "-c:v", "libx264",
+        "-preset", "veryfast",
         "-tune", "stillimage",
         "-c:a", "aac",
         "-b:a", "192k",
@@ -772,14 +773,25 @@ async def generate_video_async(
             progress=88,
             detail="Calculating interaction timeline",
         )
-        clip_durations = await asyncio.gather(
-            *[
-                _get_video_duration_limited(item["video_path"], probe_semaphore)
-                for item in processed_cards
-            ]
-        )
-        for item, clip_duration in zip(processed_cards, clip_durations):
-            item["clip_duration"] = clip_duration
+        duration_tasks: List[tuple[Dict[str, Any], asyncio.Task[float]]] = []
+        for item in processed_cards:
+            video_path = item.get("video_path")
+            if video_path:
+                duration_tasks.append(
+                    (
+                        item,
+                        asyncio.create_task(
+                            _get_video_duration_limited(video_path, probe_semaphore)
+                        ),
+                    )
+                )
+            else:
+                item["clip_duration"] = 0.0
+
+        if duration_tasks:
+            clip_durations = await asyncio.gather(*[task for _, task in duration_tasks])
+            for (item, _), clip_duration in zip(duration_tasks, clip_durations):
+                item["clip_duration"] = clip_duration
 
         timeline_cursor = 0.0
         interactions: List[Dict[str, Any]] = []
@@ -815,7 +827,11 @@ async def generate_video_async(
         )
 
         local_video_url = f"{config.VIDEO_BASE_URL}/{output_filename}"
-        video_gcs_uri = _upload_video_to_gcs(output_path, request_id=request_id)
+        video_gcs_uri = await asyncio.to_thread(
+            _upload_video_to_gcs,
+            output_path,
+            request_id,
+        )
         if video_gcs_uri and getattr(config, "VIDEO_RETURN_GCS_URI", True):
             video_url = video_gcs_uri
         else:
