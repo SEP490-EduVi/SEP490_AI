@@ -67,3 +67,9 @@ VIDEO_SCREENSHOT_FALLBACK = (
 CONCAT_FASTSTART_ON_COPY = (
 	os.getenv("CONCAT_FASTSTART_ON_COPY", "false").strip().lower() == "true"
 )
+
+# When stream-copy concat fails, fallback re-encode can consume extra RAM/CPU.
+CONCAT_ALLOW_REENCODE_FALLBACK = (
+	os.getenv("CONCAT_ALLOW_REENCODE_FALLBACK", "true").strip().lower() == "true"
+)
+CONCAT_FALLBACK_PRESET = os.getenv("CONCAT_FALLBACK_PRESET", "ultrafast")

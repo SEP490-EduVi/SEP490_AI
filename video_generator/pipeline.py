@@ -886,7 +886,13 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
             stderr.decode().strip(),
         )
 
+        if not bool(getattr(config, "CONCAT_ALLOW_REENCODE_FALLBACK", True)):
+            raise RuntimeError(
+                "Fast concat copy failed and re-encode fallback is disabled by CONCAT_ALLOW_REENCODE_FALLBACK=false"
+            )
+
         # Compatibility fallback: re-encode to guarantee successful merge.
+        fallback_preset = str(getattr(config, "CONCAT_FALLBACK_PRESET", "ultrafast") or "ultrafast").strip()
         safe_cmd = [
             ffmpeg, "-y",
             "-f", "concat",
@@ -895,7 +901,9 @@ async def _concat_videos(video_paths: List[str], output_path: str) -> str:
             "-vf", "fps=30,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
             "-threads", ffmpeg_threads,
             "-c:v", "libx264",
-            "-preset", "veryfast",
+            "-preset", fallback_preset,
+            "-tune", "zerolatency",
+            "-x264-params", "rc-lookahead=0:sync-lookahead=0:bframes=0",
             "-r", "30",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",

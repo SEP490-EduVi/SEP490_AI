@@ -39,6 +39,8 @@ _recent_event_ids: dict[str, float] = {}
 _recent_event_ids_lock = asyncio.Lock()
 _terminal_tasks_published: dict[str, float] = {}
 _terminal_tasks_published_lock = asyncio.Lock()
+_task_published_events: dict[str, set[str]] = {}
+_task_published_events_lock = asyncio.Lock()
 
 
 async def _is_duplicate_progress_event(signature: tuple) -> bool:
@@ -106,6 +108,33 @@ async def _mark_event_id_published(event_id: str, task_id: str, status: str) -> 
     if status in {"completed", "failed"}:
         async with _terminal_tasks_published_lock:
             _terminal_tasks_published[task_id] = now
+
+
+async def _should_publish_task_event(task_id: str, event_id: str, status: str) -> bool:
+    """Return False if this exact task event has already been published."""
+    now = time.monotonic()
+
+    async with _task_published_events_lock:
+        # Periodic cleanup for finished tasks to keep memory bounded.
+        if _terminal_tasks_published:
+            expired = [
+                key
+                for key, ts in _terminal_tasks_published.items()
+                if (now - ts) > (_EVENT_ID_DEDUP_WINDOW_SEC * 10)
+            ]
+            for key in expired:
+                _terminal_tasks_published.pop(key, None)
+                _task_published_events.pop(key, None)
+
+        published = _task_published_events.setdefault(task_id, set())
+        if event_id in published:
+            return False
+
+        published.add(event_id)
+        if status in {"completed", "failed"}:
+            _terminal_tasks_published[task_id] = now
+
+    return True
 
 
 async def get_connection() -> aio_pika.abc.AbstractRobustConnection:
@@ -225,6 +254,14 @@ async def _publish_progress(
     )
 
     event_id = f"{task_id}:{status}:{step}:{int(progress)}"
+    if not await _should_publish_task_event(task_id, event_id, status):
+        logger.warning(
+            "Suppressed duplicate task event task=%s event_id=%s",
+            task_id,
+            event_id,
+        )
+        return
+
     if await _is_duplicate_event_id(event_id, task_id, status):
         logger.warning(
             "Suppressed duplicate event_id task=%s event_id=%s",
