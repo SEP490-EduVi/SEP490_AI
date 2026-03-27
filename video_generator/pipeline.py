@@ -56,6 +56,11 @@ def _video_scale_filter() -> str:
     )
 
 
+def _video_track_timescale() -> str:
+    timescale = max(1000, int(getattr(config, "VIDEO_TRACK_TIMESCALE", 90000)))
+    return str(timescale)
+
+
 async def _emit_progress(
     progress_callback: ProgressCallback | None,
     step: str,
@@ -334,6 +339,8 @@ async def _create_slide_clip(image_path: str, audio_path: str, output_path: str)
         "48000",
         "-pix_fmt",
         "yuv420p",
+        "-video_track_timescale",
+        _video_track_timescale(),
         "-shortest",
         "-movflags",
         "+faststart",
@@ -386,6 +393,8 @@ async def _create_material_clip(
             _video_fps(),
             "-pix_fmt",
             "yuv420p",
+            "-video_track_timescale",
+            _video_track_timescale(),
             "-c:a",
             "aac",
             "-ac",
@@ -460,7 +469,18 @@ async def _concat_videos(video_paths: list[str], output_path: str) -> None:
             )
             return
 
-        logger.warning("Concat copy failed, fallback re-encode: %s", stderr.decode().strip())
+        copy_error = stderr.decode().strip()
+        if not bool(getattr(config, "CONCAT_ALLOW_REENCODE_FALLBACK", False)):
+            logger.error(
+                "concat_mode=stream_copy_failed fallback=disabled clips=%d error=%s",
+                len(video_paths),
+                copy_error,
+            )
+            raise RuntimeError(
+                "Stream-copy concat failed and CONCAT_ALLOW_REENCODE_FALLBACK=false"
+            )
+
+        logger.warning("Concat copy failed, fallback re-encode: %s", copy_error)
         safe_cmd = [
             ffmpeg,
             "-y",

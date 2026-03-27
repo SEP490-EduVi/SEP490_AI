@@ -23,7 +23,7 @@ TASK_IDEMPOTENCY_ENABLED = (
 )
 TASK_IDEMPOTENCY_WINDOW_SEC = float(os.getenv("TASK_IDEMPOTENCY_WINDOW_SEC", "120"))
 
-# Pipeline concurrency.
+# Pipeline concurrency
 MAX_SLIDE_CONCURRENCY = int(os.getenv("MAX_SLIDE_CONCURRENCY", "1"))
 RENDER_CONCURRENCY = int(os.getenv("RENDER_CONCURRENCY", "1"))
 TTS_CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "1"))
@@ -34,6 +34,13 @@ FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "ultrafast")
 VIDEO_FPS = int(os.getenv("VIDEO_FPS", "24"))
 VIDEO_WIDTH = int(os.getenv("VIDEO_WIDTH", "1280"))
 VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "720"))
+VIDEO_TRACK_TIMESCALE = int(os.getenv("VIDEO_TRACK_TIMESCALE", "90000"))
+
+# Fastest/lowest-CPU concat mode is stream-copy.
+# Keep fallback disabled by default; enable only when copy fails on mixed assets.
+CONCAT_ALLOW_REENCODE_FALLBACK = (
+    os.getenv("CONCAT_ALLOW_REENCODE_FALLBACK", "false").strip().lower() == "true"
+)
 
 # Reduce event spam to RabbitMQ during per-card processing.
 PROGRESS_STEP_GRANULARITY = int(os.getenv("PROGRESS_STEP_GRANULARITY", "10"))
