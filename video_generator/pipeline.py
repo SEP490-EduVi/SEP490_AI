@@ -5,6 +5,7 @@ import logging
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from html import unescape
 from pathlib import Path
@@ -417,10 +418,12 @@ async def _concat_videos(video_paths: list[str], output_path: str) -> None:
 
     if len(video_paths) == 1:
         shutil.copy(video_paths[0], output_path)
+        logger.info("concat_mode=single_copy clips=1 output=%s", output_path)
         return
 
     ffmpeg = _find_binary("ffmpeg")
     concat_file = Path(output_path).with_suffix(".concat.txt")
+    concat_started = time.perf_counter()
 
     with open(concat_file, "w", encoding="utf-8") as fp:
         for clip in video_paths:
@@ -449,6 +452,12 @@ async def _concat_videos(video_paths: list[str], output_path: str) -> None:
         )
         _, stderr = await proc.communicate()
         if proc.returncode == 0:
+            logger.info(
+                "concat_mode=stream_copy clips=%d elapsed=%.2fs output=%s",
+                len(video_paths),
+                time.perf_counter() - concat_started,
+                output_path,
+            )
             return
 
         logger.warning("Concat copy failed, fallback re-encode: %s", stderr.decode().strip())
@@ -483,6 +492,13 @@ async def _concat_videos(video_paths: list[str], output_path: str) -> None:
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg concat failed: {stderr.decode()}")
+
+        logger.info(
+            "concat_mode=reencode clips=%d elapsed=%.2fs output=%s",
+            len(video_paths),
+            time.perf_counter() - concat_started,
+            output_path,
+        )
     finally:
         concat_file.unlink(missing_ok=True)
 
