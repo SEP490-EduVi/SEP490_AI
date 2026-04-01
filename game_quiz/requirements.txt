@@ -1,0 +1,5 @@
+google-genai>=1.0.0
+aio-pika>=9.4.0
+google-cloud-storage>=2.18.0
+beautifulsoup4==4.12.3
+python-dotenv==1.0.1
