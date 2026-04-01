@@ -25,9 +25,8 @@ logging.basicConfig(
 logger = logging.getLogger("game_quiz")
 
 _active_tasks: set[str] = set()
-_active_tasks_lock = asyncio.Lock()
 _recent_task_claims: dict[str, float] = {}
-_recent_task_claims_lock = asyncio.Lock()
+_idempotency_lock = asyncio.Lock()  # single lock guards both _active_tasks and _recent_task_claims
 _published_event_ids: dict[str, set[str]] = {}
 _published_event_ids_lock = asyncio.Lock()
 
@@ -137,7 +136,7 @@ async def _try_claim_task(task_id: str) -> bool:
     now = time.monotonic()
     window = max(1.0, float(Config.TASK_IDEMPOTENCY_WINDOW_SEC))
 
-    async with _recent_task_claims_lock:
+    async with _idempotency_lock:
         expired = [
             key
             for key, ts in _recent_task_claims.items()
@@ -145,29 +144,29 @@ async def _try_claim_task(task_id: str) -> bool:
         ]
         for key in expired:
             _recent_task_claims.pop(key, None)
+            _active_tasks.discard(key)
 
         last = _recent_task_claims.get(task_id)
         if last is not None and (now - last) <= window:
             return False
 
-    async with _active_tasks_lock:
         if task_id in _active_tasks:
             return False
-        _active_tasks.add(task_id)
 
-    async with _recent_task_claims_lock:
+        _active_tasks.add(task_id)
         _recent_task_claims[task_id] = now
 
     return True
 
 
 async def _release_task(task_id: str) -> None:
-    """Release in-flight task marker."""
+    """Release in-flight task marker and allow retries for the same task_id."""
     if not Config.TASK_IDEMPOTENCY_ENABLED:
         return
 
-    async with _active_tasks_lock:
+    async with _idempotency_lock:
         _active_tasks.discard(task_id)
+        _recent_task_claims.pop(task_id, None)
 
 
 async def _publish_progress(

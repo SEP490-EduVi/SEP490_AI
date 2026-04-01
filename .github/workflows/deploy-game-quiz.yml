@@ -49,4 +49,4 @@ jobs:
           script: |
             cd /opt/eduvi
             docker compose pull game-quiz
-            docker compose up -d game-quiz
+            docker compose up -d --no-deps game-quiz

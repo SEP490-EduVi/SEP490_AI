@@ -93,7 +93,14 @@ def _make_client() -> genai.Client:
     )
 
 
-_client = _make_client()
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        _client = _make_client()
+    return _client
 
 
 async def _emit_progress(
@@ -323,14 +330,17 @@ def _build_json_fix_prompt(raw: str) -> str:
 
 
 async def _call_llm(prompt: str) -> str:
-    response = await _client.aio.models.generate_content(
-        model=Config.GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.25,
-            response_mime_type="application/json",
+    response = await asyncio.wait_for(
+        _get_client().aio.models.generate_content(
+            model=Config.GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.25,
+                response_mime_type="application/json",
+            ),
         ),
+        timeout=Config.LLM_TIMEOUT_SEC,
     )
     return response.text or ""
 
@@ -531,7 +541,7 @@ Yêu cầu:
 1. Trả về JSON object của đúng 1 round.
 2. Tiếng Việt có dấu.
 3. Có đúng {pair_count or 3} cặp left-right.
-4. Nếu slide thiếu dữ liệu thì tự tạo cặp mới cùng chủ đề địa lí của bài.
+4. Nếu slide thiếu dữ liệu thì tự tạo cặp mới cùng chủ đề của bài.
 5. Không lặp lại ý tưởng chính của các prompt gần nhất.
 6. Hạn chế dùng lại các label đã xuất hiện ở round gần nhất.
 
@@ -561,7 +571,7 @@ Yêu cầu:
 1. Trả về JSON object của đúng 1 round.
 2. Tiếng Việt có dấu.
 3. Có đúng {choice_count or 4} lựa chọn và correctIndex.
-4. Nếu slide thiếu dữ liệu thì tự tạo câu hỏi mới cùng chủ đề địa lí của bài.
+4. Nếu slide thiếu dữ liệu thì tự tạo câu hỏi mới cùng chủ đề bài học.
 5. Không lặp lại ý tưởng chính của các prompt gần nhất.
 6. Hạn chế dùng lại cụm lựa chọn đã xuất hiện ở round gần nhất.
 
@@ -828,7 +838,7 @@ async def generate_game_async(
     if rounds > 1:
         round_payloads = payload if isinstance(payload, list) else [payload]
         existing_prompts = [str((item or {}).get("prompt") or "").strip() for item in round_payloads]
-        max_extra_attempts = max(3, rounds * 2)
+        max_extra_attempts = 5
         attempts = 0
 
         while len(round_payloads) < rounds and attempts < max_extra_attempts:

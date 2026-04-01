@@ -46,6 +46,7 @@ class Config:
     MAX_SOURCE_CHARS: int = int(os.getenv("GAME_QUIZ_MAX_SOURCE_CHARS", "12000"))
     MAX_TEMPLATE_CHARS: int = int(os.getenv("GAME_QUIZ_MAX_TEMPLATE_CHARS", "8000"))
     JSON_RETRY_COUNT: int = int(os.getenv("GAME_QUIZ_JSON_RETRY_COUNT", "1"))
+    LLM_TIMEOUT_SEC: float = float(os.getenv("GAME_QUIZ_LLM_TIMEOUT_SEC", "120"))
     LOG_RESULT_PAYLOAD: bool = (
         os.getenv("GAME_QUIZ_LOG_RESULT_PAYLOAD", "false").strip().lower() == "true"
     )
