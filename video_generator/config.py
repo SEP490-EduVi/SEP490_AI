@@ -39,7 +39,7 @@ VIDEO_TRACK_TIMESCALE = int(os.getenv("VIDEO_TRACK_TIMESCALE", "90000"))
 # Audio encoding knobs (lower defaults reduce CPU and output size).
 AUDIO_CHANNELS = int(os.getenv("AUDIO_CHANNELS", "1"))
 AUDIO_SAMPLE_RATE = int(os.getenv("AUDIO_SAMPLE_RATE", "24000"))
-AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "96k")
+AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "64k")
 
 # Fastest/lowest-CPU concat mode is stream-copy.
 # Keep fallback disabled by default; enable only when copy fails on mixed assets.
@@ -62,8 +62,9 @@ VIDEO_RETURN_GCS_URI = (
 )
 
 # Runtime cleanup
+# Keep browser alive across requests — avoids ~1-2s Chromium cold-start per job.
 CLEANUP_BROWSER_EACH_REQUEST = (
-    os.getenv("CLEANUP_BROWSER_EACH_REQUEST", "true").strip().lower() == "true"
+    os.getenv("CLEANUP_BROWSER_EACH_REQUEST", "false").strip().lower() == "true"
 )
 
 # TTS retry

@@ -52,6 +52,17 @@ async def _get_browser():
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
                 "--no-zygote",
+                # Reduce background CPU/RAM usage by disabling unneeded Chrome subsystems.
+                "--disable-extensions",
+                "--disable-sync",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-translate",
+                "--no-first-run",
+                "--disable-hang-monitor",
+                "--disable-client-side-phishing-detection",
+                "--disable-renderer-backgrounding",
+                "--disable-background-timer-throttling",
             ]
             if os.getenv("PLAYWRIGHT_NO_SANDBOX", "true").strip().lower() == "true":
                 launch_args.append("--no-sandbox")

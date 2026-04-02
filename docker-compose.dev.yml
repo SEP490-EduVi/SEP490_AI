@@ -134,11 +134,16 @@ services:
       PROBE_CONCURRENCY: ${VIDEO_PROBE_CONCURRENCY:-1}
       FFMPEG_THREADS: ${VIDEO_FFMPEG_THREADS:-1}
       FFMPEG_PRESET: ${VIDEO_FFMPEG_PRESET:-ultrafast}
-      VIDEO_FPS: ${VIDEO_FPS:-24}
+      # 15fps is enough for still-image slides; reduces encode time ~37% vs 24fps.
+      VIDEO_FPS: ${VIDEO_FPS:-15}
       VIDEO_WIDTH: ${VIDEO_WIDTH:-960}
       VIDEO_HEIGHT: ${VIDEO_HEIGHT:-540}
       PROGRESS_STEP_GRANULARITY: ${VIDEO_PROGRESS_STEP_GRANULARITY:-15}
       PERSIST_PROCESSING_EVENTS: ${VIDEO_PERSIST_PROCESSING_EVENTS:-false}
+      # Keep Chromium browser alive across requests — avoids cold-start overhead.
+      CLEANUP_BROWSER_EACH_REQUEST: ${VIDEO_CLEANUP_BROWSER:-false}
+      # 64k is sufficient for TTS speech audio; saves ~33% vs 96k.
+      AUDIO_BITRATE: ${VIDEO_AUDIO_BITRATE:-64k}
       # Google Cloud
       GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
       VIDEO_GCS_PREFIX: ${VIDEO_GCS_PREFIX:-generated_videos}
@@ -146,6 +151,9 @@ services:
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
     cpus: ${VIDEO_GENERATOR_CPUS:-1.50}
+    # Cap memory so OOM is caught early rather than silent container kill.
+    mem_limit: ${VIDEO_GENERATOR_MEM_LIMIT:-768m}
+    memswap_limit: ${VIDEO_GENERATOR_MEM_LIMIT:-768m}
     volumes:
       - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
       - ./videos:/app/videos
