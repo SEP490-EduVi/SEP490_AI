@@ -312,12 +312,28 @@ def _resolve_youtube_url_sync(source: str) -> str:
     raise RuntimeError("Cannot resolve Youtube media URL")
 
 
-async def _resolve_material_source(source: str) -> str:
+def _download_gcs_to_file_sync(gcs_uri: str, local_path: str) -> None:
+    from google.cloud import storage as gcs
+
+    if not gcs_uri.startswith("gs://"):
+        raise ValueError(f"Not a gs:// URI: {gcs_uri}")
+    raw = gcs_uri[5:]
+    bucket_name, blob_name = raw.split("/", 1)
+    client = gcs.Client()
+    client.bucket(bucket_name).blob(blob_name).download_to_filename(local_path)
+
+
+async def _resolve_material_source(source: str, tmp_dir: Path | None = None) -> str:
     src = str(source or "").strip()
     if not src:
         raise RuntimeError("Empty material source")
     if _is_youtube_url(src):
         return await asyncio.to_thread(_resolve_youtube_url_sync, src)
+    if src.startswith("gs://"):
+        suffix = Path(src).suffix or ".mp4"
+        dest = tmp_dir / f"material_{uuid.uuid4().hex[:8]}{suffix}" if tmp_dir else Path(tempfile.mktemp(suffix=suffix))
+        await asyncio.to_thread(_download_gcs_to_file_sync, src, str(dest))
+        return str(dest)
     return src
 
 
@@ -385,9 +401,10 @@ async def _create_material_clip(
     output_path: str,
     start_time: float | None,
     end_time: float | None,
+    tmp_dir: Path | None = None,
 ) -> None:
     ffmpeg = _find_binary("ffmpeg")
-    source = await _resolve_material_source(source_video)
+    source = await _resolve_material_source(source_video, tmp_dir=tmp_dir)
 
     cmd = [ffmpeg, "-y"]
     if start_time is not None and start_time >= 0:
@@ -635,6 +652,7 @@ async def _process_card(
                 output_path=out,
                 start_time=material.get("start"),
                 end_time=material.get("end"),
+                tmp_dir=tmp_dir,
             )
         return {
             "card_num": card_num,
