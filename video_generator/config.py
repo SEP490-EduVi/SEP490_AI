@@ -10,7 +10,7 @@ RABBITMQ_PASS = os.getenv("RABBITMQ_PASS", "guest")
 RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
 REQUEST_QUEUE = os.getenv("VIDEO_REQUEST_QUEUE", "video.generation.requests")
 RESULT_QUEUE = os.getenv("VIDEO_RESULT_QUEUE", "pipeline.results")
-PREFETCH_COUNT = int(os.getenv("PREFETCH_COUNT", "1"))
+PREFETCH_COUNT = int(os.getenv("PREFETCH_COUNT", "3"))
 
 # Progress event behavior
 PERSIST_PROCESSING_EVENTS = (

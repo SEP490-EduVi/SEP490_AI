@@ -111,7 +111,13 @@ services:
       - eduvi
 
   # ── Video Generator Worker ───────────────────────────────────────────
-  # Scale for concurrent users: docker compose up --scale video-generator=3
+  # Scale for concurrent users:
+  #   3 replicas → handles ~3 simultaneous jobs   (dev/staging)
+  #   5 replicas → handles ~5 simultaneous jobs   (light production)
+  #  10 replicas → handles ~10 simultaneous jobs  (peak load)
+  # Command: docker compose up --scale video-generator=5 -d
+  # Each replica needs: ~768 MB RAM, ~1.5 CPU burst.
+  # Host machine with 3.8 GB RAM can safely run 3–4 replicas.
   video-generator:
     build:
       context: .
@@ -150,10 +156,11 @@ services:
       VIDEO_RETURN_GCS_URI: ${VIDEO_RETURN_GCS_URI:-true}
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
       GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
-    cpus: ${VIDEO_GENERATOR_CPUS:-1.50}
+    # 1.5 = burst budget for Chromium+FFmpeg peaks; lower to 1.0 to flatten CPU at cost of speed.
+    cpus: ${VIDEO_GENERATOR_CPUS:-4.50}
     # Cap memory so OOM is caught early rather than silent container kill.
-    mem_limit: ${VIDEO_GENERATOR_MEM_LIMIT:-768m}
-    memswap_limit: ${VIDEO_GENERATOR_MEM_LIMIT:-768m}
+    mem_limit: ${VIDEO_GENERATOR_MEM_LIMIT:-2g}
+    memswap_limit: ${VIDEO_GENERATOR_MEM_LIMIT:-2g}
     volumes:
       - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
       - ./videos:/app/videos
