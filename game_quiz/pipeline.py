@@ -790,7 +790,7 @@ async def generate_game_async(
     round_count: Any = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
-    """Generate a PlayableGameResponse payload for the requested template."""
+    """Generate a PlayableGameResponse payload for the requested template"""
     await _emit_progress(progress_callback, "extracting_content", 20, "Extracting text from slideEditedDocument")
 
     teacher_configs = teacher_configs or {}
