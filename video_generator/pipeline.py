@@ -369,7 +369,13 @@ async def _create_slide_clip(image_path: str, audio_path: str, output_path: str)
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    ffmpeg_timeout = max(30, int(getattr(config, "FFMPEG_TIMEOUT_SEC", 120)))
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=ffmpeg_timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise RuntimeError(f"ffmpeg create slide clip timed out after {ffmpeg_timeout}s")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg create slide clip failed: {stderr.decode()}")
 
@@ -433,7 +439,13 @@ async def _create_material_clip(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    ffmpeg_timeout = max(30, int(getattr(config, "FFMPEG_TIMEOUT_SEC", 120)))
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=ffmpeg_timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise RuntimeError(f"ffmpeg create material clip timed out after {ffmpeg_timeout}s")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg create material clip failed: {stderr.decode()}")
 
@@ -709,7 +721,11 @@ async def generate_video_async(
                     return
                 card_num = idx + 1
                 card = cards[idx]
-                result = await _process_card(card, card_num, tmp_dir, render_sem, tts_sem, ffmpeg_sem)
+                try:
+                    result = await _process_card(card, card_num, tmp_dir, render_sem, tts_sem, ffmpeg_sem)
+                except Exception as exc:
+                    logger.error("Card %d failed, skipping: %s", card_num, exc)
+                    result = {"card_num": card_num, "video_path": None, "interaction": None}
                 await results_q.put(result)
                 cards[idx] = None
 
