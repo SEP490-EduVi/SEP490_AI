@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import warnings
 from datetime import datetime, timezone
@@ -691,13 +692,25 @@ def _normalize_drag_drop_payload(
     item_positions = _default_item_start_positions(len(pairs), item_start_y)
     zone_positions = _default_drop_zones(len(pairs), zone_start_y)
 
+    # Shuffle item and zone positions independently so they are not visually aligned
+    # (creates a "crossed" layout that requires users to think before drag-dropping)
+    item_positions_shuffled = item_positions[:]
+    random.shuffle(item_positions_shuffled)
+
+    zone_positions_shuffled = zone_positions[:]
+    # Rotate by a random non-zero offset to guarantee no item aligns with its zone
+    n = len(pairs)
+    if n > 1:
+        offset = random.randint(1, n - 1)
+        zone_positions_shuffled = zone_positions_shuffled[offset:] + zone_positions_shuffled[:offset]
+
     items = []
     drop_zones = []
     for idx, (left, right) in enumerate(pairs):
         item_id = f"item_{idx + 1}"
         zone_id = f"zone_{idx + 1}"
-        pos = item_positions[idx]
-        zone = zone_positions[idx]
+        pos = item_positions_shuffled[idx]
+        zone = zone_positions_shuffled[idx]
 
         items.append(
             {
