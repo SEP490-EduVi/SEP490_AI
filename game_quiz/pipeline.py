@@ -268,18 +268,6 @@ def _resolve_hover_choice_count(template_json: dict[str, Any]) -> int:
 
 
 def _resolve_drag_drop_pairs(template_json: dict[str, Any]) -> int:
-    constraints = template_json.get("constraints") if isinstance(template_json, dict) else {}
-    min_pairs = None
-    max_pairs = None
-    if isinstance(constraints, dict):
-        min_pairs = _find_first_int(constraints, {"minpairs", "minpair"})
-        max_pairs = _find_first_int(constraints, {"maxpairs", "maxpair"})
-
-    if max_pairs:
-        return max(1, min(max_pairs, 6))
-    if min_pairs:
-        return max(1, min(min_pairs, 6))
-
     return 3
 
 
