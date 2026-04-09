@@ -337,6 +337,66 @@ async def _resolve_material_source(source: str, tmp_dir: Path | None = None) -> 
     return src
 
 
+async def _create_silent_black_clip(output_path: str, duration: float = 0.1) -> None:
+    """Create a short silent black video clip used as a pause-point placeholder."""
+    ffmpeg = _find_binary("ffmpeg")
+    width = max(320, int(getattr(config, "VIDEO_WIDTH", 960)))
+    height = max(180, int(getattr(config, "VIDEO_HEIGHT", 540)))
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=black:size={width}x{height}:rate={_video_fps()}",
+        "-f",
+        "lavfi",
+        "-i",
+        f"anullsrc=channel_layout=mono:sample_rate={_audio_sample_rate()}",
+        "-t",
+        str(duration),
+        "-threads",
+        _ffmpeg_threads(),
+        "-c:v",
+        "libx264",
+        "-preset",
+        _ffmpeg_preset(),
+        "-r",
+        _video_fps(),
+        "-c:a",
+        "aac",
+        "-ac",
+        _audio_channels(),
+        "-ar",
+        _audio_sample_rate(),
+        "-b:a",
+        _audio_bitrate(),
+        "-pix_fmt",
+        "yuv420p",
+        "-video_track_timescale",
+        _video_track_timescale(),
+        "-movflags",
+        "+faststart",
+        "-loglevel",
+        "error",
+        output_path,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    ffmpeg_timeout = max(30, int(getattr(config, "FFMPEG_TIMEOUT_SEC", 120)))
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=ffmpeg_timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise RuntimeError(f"ffmpeg create silent black clip timed out after {ffmpeg_timeout}s")
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg create silent black clip failed: {stderr.decode()}")
+
+
 async def _create_slide_clip(image_path: str, audio_path: str, output_path: str) -> None:
     ffmpeg = _find_binary("ffmpeg")
     cmd = [
@@ -635,10 +695,15 @@ async def _process_card(
     """Process one card by exactly one of 3 branches."""
     interaction = _extract_interaction_payload(card)
     if interaction and interaction.get("type") in {"quiz", "flashcard", "fill_blank"}:
-        # Branch 1: interactive card -> metadata only.
+        # Branch 1: interactive card -> 0.1s silent black clip as pause-point buffer + metadata.
+        # Without a real clip, pause_time would equal the previous clip's end_time exactly,
+        # giving the frontend zero margin to intercept playback before the next clip starts.
+        out = str(tmp_dir / f"slide_{card_num}.mp4")
+        async with ffmpeg_sem:
+            await _create_silent_black_clip(out, duration=0.1)
         return {
             "card_num": card_num,
-            "video_path": None,
+            "video_path": out,
             "interaction": interaction,
         }
 
@@ -815,7 +880,10 @@ async def generate_video_async(
 
             interaction = item.get("interaction")
             if interaction:
-                pause_time = round(end_time, 3)
+                # pause_time points to the START of the interaction clip so the frontend
+                # has the full 0.1 s clip duration as a buffer before the next content
+                # clip begins.  Using end_time here would give zero margin.
+                pause_time = round(start_time, 3)
                 interactions.append(
                     {
                         "type": interaction["type"],
