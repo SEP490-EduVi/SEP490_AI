@@ -18,7 +18,7 @@ from entity_generator.base import (
 
 logger = logging.getLogger(__name__)
 
-# ── Prompts ──
+# ── Prompt ──
 
 _SYSTEM_PROMPT = (
     "Bạn là chuyên gia phân tích Sách Giáo Khoa Địa Lí Việt Nam.\n"
