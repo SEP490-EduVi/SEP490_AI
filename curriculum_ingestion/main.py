@@ -23,6 +23,7 @@ import aio_pika
 
 from config import Config
 from pipeline import run
+from neo4j_loader import delete_curriculum
 from rabbitmq_utils import get_connection, declare_queues, publish_progress
 
 if sys.platform == "win32":
@@ -104,8 +105,74 @@ async def _on_message(
                 logger.exception("Failed to publish error result.")
 
 
+async def _on_delete_message(
+    message: aio_pika.abc.AbstractIncomingMessage,
+    channel: aio_pika.abc.AbstractChannel,
+) -> None:
+    """Handle an incoming curriculum deletion task."""
+    msg: dict = {}
+    async with message.process():
+        try:
+            msg = json.loads(message.body)
+            task_id = msg["taskId"]
+            document_id = msg["documentId"]
+            subject_code = msg.get("subjectCode", "")
+            education_level = msg.get("educationLevel", "THPT")
+            curriculum_year = msg.get("curriculumYear")
+
+            # Reconstruct mon_hoc_id using same logic as neo4j_loader.ingest()
+            cap_hoc_slug = education_level.lower().replace(" ", "_")
+            year_suffix = f"_{curriculum_year}" if curriculum_year else ""
+            mon_hoc_id = f"{subject_code}_{cap_hoc_slug}{year_suffix}"
+
+            logger.info(
+                "Delete task %s | document=%s | mon_hoc=%s",
+                task_id, document_id, mon_hoc_id,
+            )
+
+            await publish_progress(
+                channel, task_id, document_id,
+                "processing", "started", 0,
+                detail=f"Starting deletion for curriculum: {mon_hoc_id}",
+            )
+
+            await publish_progress(
+                channel, task_id, document_id,
+                "processing", "deleting", 50,
+                detail=f"Deleting Neo4j data for curriculum: {mon_hoc_id}",
+            )
+
+            stats = await asyncio.get_event_loop().run_in_executor(
+                None, delete_curriculum, mon_hoc_id
+            )
+
+            await publish_progress(
+                channel, task_id, document_id,
+                "completed", "completed", 100,
+                detail=f"Deleted {stats['deleted_nodes']} nodes for curriculum {mon_hoc_id}",
+                stats=stats,
+            )
+
+            logger.info("Delete task %s completed. Stats: %s", task_id, stats)
+
+        except Exception as exc:
+            error_detail = traceback.format_exc()
+            logger.exception("Delete task %s failed.", msg.get("taskId", "unknown"))
+            try:
+                await publish_progress(
+                    channel,
+                    msg.get("taskId", "unknown"),
+                    msg.get("documentId", "unknown"),
+                    "failed", "error", 0,
+                    detail=error_detail,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                logger.exception("Failed to publish error result.")
+
+
 async def start_consumer() -> None:
-    """Connect to RabbitMQ and start consuming forever."""
+    """Connect to RabbitMQ and start consuming ingestion and deletion queues."""
     logger.info(
         "Connecting to RabbitMQ at %s:%s ...",
         Config.RABBITMQ_HOST, Config.RABBITMQ_PORT,
@@ -116,14 +183,18 @@ async def start_consumer() -> None:
     await channel.set_qos(prefetch_count=Config.PREFETCH_COUNT)
     await declare_queues(channel)
 
-    queue = await channel.declare_queue(Config.REQUEST_QUEUE, durable=True)
+    ingest_queue = await channel.declare_queue(Config.REQUEST_QUEUE, durable=True)
+    delete_queue = await channel.declare_queue(Config.DELETION_QUEUE, durable=True)
 
     logger.info(
-        "Connected! Waiting for messages on '%s' (prefetch=%d) ...",
-        Config.REQUEST_QUEUE, Config.PREFETCH_COUNT,
+        "Connected! Waiting for messages on '%s' and '%s' (prefetch=%d) ...",
+        Config.REQUEST_QUEUE, Config.DELETION_QUEUE, Config.PREFETCH_COUNT,
     )
 
-    await queue.consume(lambda msg: _on_message(msg, channel))
+    await asyncio.gather(
+        ingest_queue.consume(lambda msg: _on_message(msg, channel)),
+        delete_queue.consume(lambda msg: _on_delete_message(msg, channel)),
+    )
 
     try:
         await asyncio.Future()

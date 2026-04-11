@@ -206,33 +206,38 @@ services:
       - eduvi
 
   # ── Textbook Ingestion Worker ───────────────────────────────────────
-  # textbook-ingestion:
-  #   build:
-  #     context: ./textbook_ingestion
-  #     dockerfile: Dockerfile
-  #   container_name: textbook-ingestion
-  #   depends_on:
-  #     rabbitmq:
-  #       condition: service_healthy
-  #   environment:
-  #     # RabbitMQ
-  #     RABBITMQ_HOST: rabbitmq
-  #     RABBITMQ_PORT: 5672
-  #     RABBITMQ_USER: guest
-  #     RABBITMQ_PASSWORD: guest
-  #     # Neo4j (Aura — cloud hosted)
-  #     NEO4J_URI: ${NEO4J_URI}
-  #     NEO4J_USER: ${NEO4J_USER:-neo4j}
-  #     NEO4J_PASSWORD: ${NEO4J_PASSWORD}
-  #     # Google Cloud
-  #     GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
-  #     GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
-  #     GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
-  #   volumes:
-  #     - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
-  #   restart: unless-stopped
-  #   networks:
-  #     - eduvi
+  textbook-ingestion:
+    build:
+      context: ./textbook_ingestion
+      dockerfile: Dockerfile
+    container_name: textbook-ingestion
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      # RabbitMQ
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      # Neo4j (Aura — cloud hosted)
+      NEO4J_URI: ${NEO4J_URI}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      # Google Cloud
+      GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT}
+      GOOGLE_APPLICATION_CREDENTIALS: /app/credentials/gcp-key.json
+      # Optional tuning
+      TEXTBOOK_PREFETCH_COUNT: ${TEXTBOOK_PREFETCH_COUNT:-1}
+    volumes:
+      - ./private/gcp-key.json:/app/credentials/gcp-key.json:ro
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: unless-stopped
+    networks:
+      - eduvi
 
   # ── Curriculum Ingestion Worker ─────────────────────────────────────
   curriculum-ingestion:

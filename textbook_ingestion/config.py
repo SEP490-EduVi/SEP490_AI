@@ -27,6 +27,21 @@ class Config:
     GOOGLE_CLOUD_PROJECT: str = os.getenv("GOOGLE_CLOUD_PROJECT", "")
     VERTEX_AI_LOCATION: str = os.getenv("VERTEX_AI_LOCATION", "us-central1")
 
+    # RabbitMQ
+    RABBITMQ_HOST: str = os.getenv("RABBITMQ_HOST", "localhost")
+    RABBITMQ_PORT: int = int(os.getenv("RABBITMQ_PORT", "5672"))
+    RABBITMQ_USER: str = os.getenv("RABBITMQ_USER", "guest")
+    RABBITMQ_PASSWORD: str = os.getenv("RABBITMQ_PASSWORD", "guest")
+    RABBITMQ_VIRTUAL_HOST: str = os.getenv("RABBITMQ_VIRTUAL_HOST", "/")
+
+    # Queue names
+    REQUEST_QUEUE: str = "textbook.ingestion.requests"
+    DELETION_QUEUE: str = "textbook.deletion.requests"
+    RESULT_QUEUE: str = "textbook.ingestion.results"
+
+    # Only 1 ingestion at a time (Gemini calls are heavy, no need for parallelism)
+    PREFETCH_COUNT: int = int(os.getenv("TEXTBOOK_PREFETCH_COUNT", "1"))
+
     # Pipeline settings
     CHAPTER_LIMIT: str = os.getenv("CHAPTER_LIMIT", "ALL").strip().upper()
 
@@ -44,8 +59,6 @@ class Config:
             missing.append("GOOGLE_CLOUD_PROJECT")
         if not cls.NEO4J_PASSWORD:
             missing.append("NEO4J_PASSWORD")
-        if not cls.GOOGLE_APPLICATION_CREDENTIALS:
-            missing.append("GOOGLE_APPLICATION_CREDENTIALS")
 
         if missing:
             raise ValueError(

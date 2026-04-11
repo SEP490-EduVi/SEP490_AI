@@ -240,3 +240,44 @@ def apply_mapping(mapping_path: str) -> int:
 
     logger.info("Applied %d COVERS relationships from %s", covers_count, mapping_path)
     return covers_count
+
+
+def delete_curriculum(mon_hoc_id: str) -> dict[str, int]:
+    """
+    Delete all Neo4j data for a curriculum by its MonHoc ID prefix.
+
+    DETACH DELETE removes MonHoc, Lop, ChuDe, YeuCau nodes and all relationships,
+    including (Lesson)-[:COVERS]->(ChuDe) cross-schema links.
+
+    Returns: {"deleted_nodes": N}
+    """
+    driver = GraphDatabase.driver(
+        Config.NEO4J_URI,
+        auth=(Config.NEO4J_USER, Config.NEO4J_PASSWORD),
+    )
+
+    try:
+        with driver.session() as session:
+            result = session.run(
+                """
+                MATCH (n)
+                WHERE n.id STARTS WITH $mon_hoc_id
+                WITH count(n) AS total
+                CALL {
+                    MATCH (n)
+                    WHERE n.id STARTS WITH $mon_hoc_id
+                    DETACH DELETE n
+                }
+                RETURN total
+                """,
+                mon_hoc_id=mon_hoc_id,
+            )
+            deleted_nodes = result.single()["total"]
+    finally:
+        driver.close()
+
+    logger.info(
+        "Deleted %d nodes for curriculum %s", deleted_nodes, mon_hoc_id
+    )
+    return {"deleted_nodes": deleted_nodes}
+

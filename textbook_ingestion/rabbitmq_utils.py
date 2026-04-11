@@ -29,7 +29,7 @@ async def declare_queues(channel: aio_pika.abc.AbstractChannel) -> None:
 async def publish_progress(
     channel: aio_pika.abc.AbstractChannel,
     task_id: str,
-    document_id: str,
+    document_id: int,
     status: str,
     step: str,
     progress: int,
@@ -37,7 +37,7 @@ async def publish_progress(
     stats: dict | None = None,
     error: str | None = None,
 ) -> None:
-    """Publish a progress/result message to the curriculum result queue."""
+    """Publish a progress/result message to the textbook result queue."""
     message = {
         "taskId": task_id,
         "documentId": document_id,

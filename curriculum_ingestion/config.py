@@ -34,6 +34,7 @@ class Config:
 
     # Queue names — dedicated queues, separate from lesson_analysis
     REQUEST_QUEUE: str = "curriculum.ingestion.requests"
+    DELETION_QUEUE: str = "curriculum.deletion.requests"
     RESULT_QUEUE: str = "curriculum.ingestion.results"
 
     # Only 1 ingestion at a time per container (Neo4j MERGE is blocking, no need for parallelism)
