@@ -243,7 +243,7 @@ def _extract_narration(card: dict) -> str:
         ctype = str(content.get("type") or "").upper()
         if ctype in {"TEXT", "HEADING"}:
             txt = strip_html_tags(str(content.get("html") or ""))
-            if txt:
+            if txt and txt != title:
                 parts.append(txt)
             continue
 
