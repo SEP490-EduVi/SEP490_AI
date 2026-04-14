@@ -3,7 +3,7 @@
 import logging
 from neo4j import GraphDatabase
 from config import Config
-from entity_generator.base import BaseEntityGenerator
+from entity_generator.generator import TextbookEntityGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ _driver = GraphDatabase.driver(
 )
 
 
-def create_constraints(generator: BaseEntityGenerator) -> None:
+def create_constraints(generator: TextbookEntityGenerator) -> None:
     """Create uniqueness constraints (idempotent)."""
     constraints = generator.get_constraints()
     with _driver.session() as session:
@@ -30,7 +30,7 @@ def create_constraints(generator: BaseEntityGenerator) -> None:
 
 
 def load_textbook_data(
-    data: dict, generator: BaseEntityGenerator
+    data: dict, generator: TextbookEntityGenerator
 ) -> dict[str, int]:
     """Persist entities into Neo4j via the generator's Cypher queries."""
     with _driver.session() as session:

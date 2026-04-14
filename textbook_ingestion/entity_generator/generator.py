@@ -1,30 +1,26 @@
 """
-Geography entity generator for Vietnamese SGK Địa Lí.
+Generic textbook entity generator for Vietnamese SGK (Sách Giáo Khoa).
 
-Graph: Book → Part → Chapter → Lesson → Section → Concept | Location | Figure
-Structural IDs prefixed with book_id; knowledge nodes shared across books.
+Works for all subjects. Graph schema:
+    Book → Part → Chapter → Lesson → Section → Concept | Location | Figure
+
+Structural IDs are prefixed with book_id; knowledge nodes (Concept, Location)
+are shared across books.
 """
 
 import logging
 
 from neo4j import Session
 
-from entity_generator.base import (
-    BaseEntityGenerator,
-    NodeProperty,
-    NodeType,
-    RelationshipType,
-)
-
 logger = logging.getLogger(__name__)
 
 # ── Prompt ──
 
 _SYSTEM_PROMPT = (
-    "Bạn là chuyên gia phân tích Sách Giáo Khoa Địa Lí Việt Nam.\n"
+    "Bạn là chuyên gia phân tích Sách Giáo Khoa Việt Nam.\n"
     "Nhiệm vụ: Phân tích nội dung sách giáo khoa và trích xuất cấu trúc "
     "bao gồm Phần, Chương, Bài, Mục, cùng các thực thể tri thức (Khái niệm, "
-    "Địa danh, Hình ảnh/Bản đồ/Bảng).\n"
+    "Địa danh nếu có liên quan, Hình ảnh/Bản đồ/Bảng).\n"
     "\n"
     "CẤU TRÚC SÁCH: Sách gồm nhiều PHẦN (Part), mỗi Phần chứa nhiều CHƯƠNG (Chapter), "
     "mỗi Chương chứa nhiều BÀI (Lesson), mỗi Bài chứa nhiều MỤC (Section).\n"
@@ -45,11 +41,13 @@ _SYSTEM_PROMPT = (
     "- LOẠI BỎ khỏi content: câu hỏi ôn tập (dòng bắt đầu bằng ?, \"Đọc thông tin\", "
     "\"Dựa vào\", \"Hãy cho biết\"), hộp \"KẾT NỐI TRI THỨC VỚI CUỘC SỐNG\", "
     "và các chỉ dẫn như \"Quan sát hình...\".\n"
-    "- Location: CHỈ trích xuất ĐỊA DANH CỤ THỂ là tên riêng (Proper Noun). "
-    "KHÔNG lấy từ chung chung như 'thế giới', 'các nước', 'khu vực'.\n"
+    "- Location: CHỈ trích xuất ĐỊA DANH CỤ THỂ là tên riêng (Proper Noun) khi môn học "
+    "có liên quan đến địa lý, lịch sử hoặc địa danh thực tế. "
+    "KHÔNG lấy từ chung chung như 'thế giới', 'các nước', 'khu vực'. "
+    "Nếu môn học không liên quan đến địa danh, để mảng locations rỗng [].\n"
 )
 
-_USER_PROMPT_TEMPLATE = """Phân tích nội dung Sách Giáo Khoa Địa Lí sau đây:
+_USER_PROMPT_TEMPLATE = """Phân tích nội dung Sách Giáo Khoa sau đây:
 
 **Môn học:** {subject}
 **Lớp:** {grade}
@@ -93,7 +91,7 @@ Hãy trích xuất và trả về JSON với cấu trúc sau:
                   ],
                   "locations": [
                     {{
-                      "name": "Tên địa danh cụ thể",
+                      "name": "Tên địa danh cụ thể (nếu môn học có liên quan)",
                       "type": "Loại (Quốc gia/Núi/Sông/Biển/...)"
                     }}
                   ],
@@ -133,7 +131,7 @@ QUY TẮC TRÍCH XUẤT:
 
 2. CHƯƠNG (Chapter):
    - id: Mã ngắn gọn (C1, C2, ...). Đánh số theo sách (Chương 1 → C1).
-   - name: Tên đầy đủ (VD: "Chương 1. SỬ DỤNG BẢN ĐỒ").
+   - name: Tên đầy đủ (VD: "Chương 1. TÊN CHƯƠNG").
    - order: Số thứ tự chương THEO SÁCH (1, 2, 3, ...).
 
 3. BÀI HỌC (Lesson):
@@ -158,170 +156,49 @@ QUY TẮC TRÍCH XUẤT:
    - Nếu CÓ → trích xuất, kèm definition.
    - Nếu CHỈ được nhắc tên / liệt kê trong danh sách / dùng làm ngữ cảnh → BỎ QUA.
 
-   Ví dụ áp dụng phép thử:
-   - Bài viết: "...gồm địa lí tự nhiên và địa lí kinh tế – xã hội" → chỉ LIỆT KÊ → BỎ QUA.
-   - Bài viết: "Phong hóa là quá trình phá hủy đá..." → ĐỊNH NGHĨA → TRÍCH XUẤT.
-   - Bài viết: "kiến thức về địa hình, khí hậu, thuỷ văn" → chỉ LIỆT KÊ → BỎ QUA.
-   - Bài viết: "Khí quyển là lớp không khí bao quanh Trái Đất..." → GIẢI THÍCH → TRÍCH XUẤT.
-
-   Danh sách KHÔNG BAO GIỜ trích xuất (kể cả khi xuất hiện trong bài):
-   - Tên lĩnh vực chung: "Khoa học tự nhiên", "Khoa học xã hội", "Khoa học địa lí".
-   - Danh từ phổ thông: "Kinh tế", "Thương mại", "Dịch vụ", "Công nghiệp",
-     "Nông nghiệp", "Môi trường", "Đất đai", "Sinh vật", "Giáo dục".
-   - Tên nghề: "Kĩ sư trắc địa", "Hướng dẫn viên du lịch", v.v.
-
    definition: BẮT BUỘC trích câu định nghĩa/giải thích từ nội dung bài. Nếu bài không
    đưa ra định nghĩa rõ ràng cho thuật ngữ đó thì KHÔNG THÊM concept này.
    Ngoại lệ duy nhất: thuật ngữ rất chuyên ngành mà học sinh chắc chắn cần ghi nhớ
-   (VD: "Thạch quyển", "Sinh quyển") thì được phép để definition = null.
+   thì được phép để definition = null.
 
-6. ĐỊA DANH (Location):
+6. ĐỊA DANH (Location) — CHỈ ÁP DỤNG KHI MÔN HỌC CÓ LIÊN QUAN:
    - CHỈ trích xuất các ĐỊA DANH CỤ THỂ là TÊN RIÊNG (Proper Noun).
    - Bao gồm: tên quốc gia, thành phố, châu lục, đại dương, sông, núi, đồng bằng, biển, hồ, sa mạc cụ thể.
-   - VD đúng: "Việt Nam", "Dãy Himalaya", "Sông Hồng", "Biển Đông", "Châu Á", "Thái Bình Dương".
-   - TUYỆT ĐỐI KHÔNG lấy các từ chung chung: "Thế giới", "Toàn cầu", "Các nước", "Các khu vực", "Địa phương", "Lục địa" (không kèm tên cụ thể).
-   - type: Phân loại (Quốc gia, Châu lục, Núi, Sông, Biển, Đồng bằng, Đại dương, Sa mạc, Hồ, Thành phố, ...).
+   - VD đúng: "Việt Nam", "Dãy Himalaya", "Sông Hồng", "Biển Đông", "Châu Á".
+   - TUYỆT ĐỐI KHÔNG lấy từ chung: "Thế giới", "Toàn cầu", "Các nước", "Địa phương".
+   - Nếu môn học không liên quan đến địa danh (Toán, Vật lý, ...), để mảng rỗng [].
+   - type: Phân loại (Quốc gia, Châu lục, Núi, Sông, Biển, Đại dương, ...).
 
 7. HÌNH ẢNH (Figure):
    - Các hình, bản đồ, bảng biểu được đề cập trong nội dung giảng dạy.
    - id: Theo format "Fig_<số bài>.<số hình>" (VD: "Fig_9.1").
-   - caption: Tên đầy đủ của hình (VD: "Hình 9.1. Sự phân bố nhiệt độ...").
+   - caption: Tên đầy đủ của hình (VD: "Hình 9.1. Mô tả hình").
 
 8. Nếu không xác định được phần/chương/bài, hãy suy luận từ tiêu đề và nội dung.
 9. Ưu tiên ÍT nhưng CHÍNH XÁC hơn NHIỀU nhưng SAI.
-   Một Section GIỚI THIỆU (như Bài 1 giới thiệu môn học) có thể có 0-2 Concept hoặc KHÔNG có concept nào — đó là bình thường.
-   Một Section dạy kiến thức mới (như Bài 6 về Thạch quyển) nên có 2-5 Concept kèm definition.
 
 Trả về JSON thuần túy.
 """
 
+
 # ── Generator class ──
 
 
-class GeographyEntityGenerator(BaseEntityGenerator):
-    """Vietnamese Geography textbook entity generator."""
+class TextbookEntityGenerator:
+    """Generic Vietnamese textbook entity generator.
+
+    Works for all subjects. The prompts and Neo4j schema are designed to handle
+    any SGK structure: Book → Part → Chapter → Lesson → Section → Concept | Location | Figure.
+    Location nodes are simply left empty for subjects without geographical content.
+    """
+
+    # ── Page-skip config ──
 
     def get_skip_pages(self) -> tuple[int, int]:
         """Skip first 5 pages (cover/TOC) and last 5 pages (appendix/index)."""
         return (5, 5)
 
-    def get_node_types(self) -> list[NodeType]:
-        return [
-            NodeType(
-                label="Book",
-                description="Sách giáo khoa – nút gốc cho mỗi cuốn sách.",
-                properties=[
-                    NodeProperty("id", "String", "Mã định danh sách (VD: dia_li_10)"),
-                    NodeProperty("subject", "String", "Tên môn học"),
-                    NodeProperty("grade", "String", "Lớp/Khối"),
-                ],
-            ),
-            NodeType(
-                label="Part",
-                description="Phần – nhóm cấp cao nhất dưới Sách.",
-                properties=[
-                    NodeProperty("id", "String", "Mã định danh (VD: dia_li_10_P1)"),
-                    NodeProperty("name", "String", "Tên phần"),
-                    NodeProperty("order", "Integer", "Số thứ tự phần"),
-                ],
-            ),
-            NodeType(
-                label="Chapter",
-                description="Chương – nhóm các bài học trong một Phần.",
-                properties=[
-                    NodeProperty("id", "String", "Mã định danh (VD: dia_li_10_C1)"),
-                    NodeProperty("name", "String", "Tên chương"),
-                    NodeProperty("order", "Integer", "Số thứ tự"),
-                ],
-            ),
-            NodeType(
-                label="Lesson",
-                description="Bài học cụ thể mà học sinh theo dõi.",
-                properties=[
-                    NodeProperty("id", "String", "Mã định danh (VD: dia_li_10_L9)"),
-                    NodeProperty("name", "String", "Tên bài"),
-                    NodeProperty("order", "Integer", "Số thứ tự bài"),
-                ],
-            ),
-            NodeType(
-                label="Section",
-                description="Mục nội dung – thùng chứa văn bản gốc cho RAG.",
-                properties=[
-                    NodeProperty("id", "String", "Mã định danh (VD: dia_li_10_Sec_9.1)"),
-                    NodeProperty("heading", "String", "Tiêu đề mục"),
-                    NodeProperty("content", "String", "Toàn bộ văn bản của mục"),
-                    NodeProperty("page", "Integer", "Trang trong PDF"),
-                ],
-            ),
-            NodeType(
-                label="Concept",
-                description="Khái niệm/Thuật ngữ/Quá trình địa lí.",
-                properties=[
-                    NodeProperty("name", "String", "Tên khái niệm"),
-                    NodeProperty(
-                        "definition", "String",
-                        "Câu định nghĩa ngắn gọn", required=False,
-                    ),
-                ],
-            ),
-            NodeType(
-                label="Location",
-                description="Địa danh – không gian địa lý thực tế.",
-                properties=[
-                    NodeProperty("name", "String", "Tên địa danh"),
-                    NodeProperty(
-                        "type", "String",
-                        "Phân loại (Quốc gia, Núi, Sông, ...)", required=False,
-                    ),
-                ],
-            ),
-            NodeType(
-                label="Figure",
-                description="Hình ảnh/Bản đồ/Bảng trong sách.",
-                properties=[
-                    NodeProperty("id", "String", "Mã hình (VD: Fig_9.1)"),
-                    NodeProperty("caption", "String", "Tên/mô tả hình"),
-                ],
-            ),
-        ]
-
-    def get_relationship_types(self) -> list[RelationshipType]:
-        return [
-            RelationshipType(
-                "HAS", "Book", "Part",
-                "Sách chứa các Phần.",
-            ),
-            RelationshipType(
-                "HAS", "Part", "Chapter",
-                "Phần chứa các Chương.",
-            ),
-            RelationshipType(
-                "HAS", "Part", "Lesson",
-                "Phần chứa Bài trực tiếp (không thuộc Chương nào).",
-            ),
-            RelationshipType(
-                "HAS", "Chapter", "Lesson",
-                "Chương chứa các Bài.",
-            ),
-            RelationshipType(
-                "HAS", "Lesson", "Section",
-                "Bài chứa các Mục (nơi chứa text).",
-            ),
-            RelationshipType(
-                "MENTIONS", "Section", "Concept",
-                "Đoạn văn nhắc đến/giải thích khái niệm này.",
-            ),
-            RelationshipType(
-                "MENTIONS", "Section", "Location",
-                "Đoạn văn lấy địa danh này làm ví dụ.",
-            ),
-            RelationshipType(
-                "MENTIONS", "Section", "Figure",
-                "Đoạn văn yêu cầu xem hình ảnh này.",
-            ),
-        ]
-
-    # ── Prompts ──
+    # ── LLM prompts ──
 
     def get_system_prompt(self) -> str:
         return _SYSTEM_PROMPT
@@ -368,7 +245,7 @@ class GeographyEntityGenerator(BaseEntityGenerator):
         raw_json["parts"] = parts
         return raw_json
 
-    # ── Internal helpers for parse_response ──
+    # ── Internal helpers ──
 
     @staticmethod
     def _normalise_lesson(lesson: dict, ls_idx: int, book_id: str) -> None:
@@ -386,7 +263,6 @@ class GeographyEntityGenerator(BaseEntityGenerator):
                 section["id"] = f"{book_id}_{raw_id}"
             else:
                 section["id"] = raw_id
-            # setdefault won't replace explicit None, so use fallback
             if section.get("heading") is None:
                 section["heading"] = f"Mục {sec_idx + 1}"
             if section.get("content") is None:
@@ -405,7 +281,7 @@ class GeographyEntityGenerator(BaseEntityGenerator):
                 if not fig_raw.startswith(book_id):
                     fig["id"] = f"{book_id}_{fig_raw}"
 
-    # ── Constraints ──
+    # ── Neo4j constraints ──
 
     def get_constraints(self) -> list[str]:
         return [
@@ -439,7 +315,6 @@ class GeographyEntityGenerator(BaseEntityGenerator):
             "figures": 0,
         }
 
-        # Book root node
         self._create_book(session, book_id, subject, grade)
         counts["books"] += 1
 
@@ -447,7 +322,6 @@ class GeographyEntityGenerator(BaseEntityGenerator):
             self._create_part(session, part, book_id)
             counts["parts"] += 1
 
-            # Chapters inside this Part
             for chapter in part.get("chapters", []):
                 self._create_chapter(session, chapter, part["id"])
                 counts["chapters"] += 1
@@ -457,7 +331,6 @@ class GeographyEntityGenerator(BaseEntityGenerator):
                     counts["lessons"] += 1
                     self._load_lesson_sections(session, lesson, counts)
 
-            # Lessons directly under Part (no chapter)
             for lesson in part.get("lessons", []):
                 self._create_lesson_under_part(session, lesson, part["id"])
                 counts["lessons"] += 1
@@ -472,7 +345,6 @@ class GeographyEntityGenerator(BaseEntityGenerator):
     def _load_lesson_sections(
         self, session: Session, lesson: dict, counts: dict[str, int]
     ) -> None:
-        """Load sections and knowledge nodes for a single lesson."""
         for section in lesson.get("sections", []):
             self._create_section(session, section, lesson["id"])
             counts["sections"] += 1
@@ -584,7 +456,6 @@ class GeographyEntityGenerator(BaseEntityGenerator):
     def _create_lesson_under_part(
         session: Session, lesson: dict, part_id: str
     ) -> None:
-        """Lesson that sits directly under a Part (no Chapter)."""
         session.run(
             """
             MATCH  (p:Part {id: $part_id})
@@ -628,9 +499,7 @@ class GeographyEntityGenerator(BaseEntityGenerator):
             content=section["content"],
             page=section["page"],
         )
-        logger.info(
-            "      Section: %s – %s", section["id"], section["heading"]
-        )
+        logger.info("      Section: %s – %s", section["id"], section["heading"])
 
     @staticmethod
     def _link_concept(

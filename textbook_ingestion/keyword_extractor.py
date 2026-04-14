@@ -15,7 +15,7 @@ from config import Config
 from chunker import TextChunk
 
 if TYPE_CHECKING:
-    from entity_generator.base import BaseEntityGenerator
+    from entity_generator.generator import TextbookEntityGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ def extract_entities(
     subject: str,
     grade: str,
     book_id: str,
-    generator: "BaseEntityGenerator",
+    generator: "TextbookEntityGenerator",
     chapter_limit: int | None = None,
 ) -> dict:
     """Extract entities from every chunk, merge, and return validated data.
@@ -177,7 +177,7 @@ def _extract_single_chunk(
     subject: str,
     grade: str,
     system_prompt: str,
-    generator: "BaseEntityGenerator",
+    generator: "TextbookEntityGenerator",
 ) -> dict | None:
     """Call Gemini via Vertex AI for one chunk with smart retry.
 
