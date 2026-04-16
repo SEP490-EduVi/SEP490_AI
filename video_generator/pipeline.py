@@ -238,7 +238,52 @@ def _extract_narration(card: dict) -> str:
 
     def _normalize_for_dedupe(value: str) -> str:
         compact = re.sub(r"\s+", " ", str(value or "")).strip().lower()
-        return re.sub(r"^[\W_]+|[\W_]+$", "", compact)
+        compact = re.sub(r"[^\w\s]", " ", compact, flags=re.UNICODE)
+        compact = compact.replace("_", " ")
+        return re.sub(r"\s+", " ", compact).strip()
+
+    def _strip_repeated_title_prefix(text: str, title_text: str) -> str:
+        txt = str(text or "").strip()
+        title_clean = str(title_text or "").strip()
+        if not txt or not title_clean:
+            return txt
+
+        normalized_txt = _normalize_for_dedupe(txt)
+        normalized_title_local = _normalize_for_dedupe(title_clean)
+        if len(normalized_title_local) < 6 or not normalized_txt.startswith(normalized_title_local):
+            return txt
+
+        # Prefer exact prefix strip first (keeps the rest of sentence unchanged).
+        direct_prefix = re.sub(
+            rf"^\s*{re.escape(title_clean)}\s*[:\-\u2013\u2014,.;!?]*\s*",
+            "",
+            txt,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
+        if direct_prefix:
+            return direct_prefix
+
+        # Fallback for punctuation/spacing variants between title and body text.
+        tokens = re.findall(r"\w+", title_clean, flags=re.UNICODE)
+        if len(tokens) >= 2:
+            sep = r"[\s\-\u2013\u2014:;,.!?()\"'_/]+"
+            token_prefix_pattern = (
+                r"^\s*"
+                + sep.join(re.escape(token) for token in tokens)
+                + r"(?:\s*[:\-\u2013\u2014,.;!?)]\s*)?"
+            )
+            token_prefix = re.sub(
+                token_prefix_pattern,
+                "",
+                txt,
+                count=1,
+                flags=re.IGNORECASE,
+            ).strip()
+            if token_prefix:
+                return token_prefix
+
+        return txt
 
     normalized_parts: list[str] = []
 
@@ -264,6 +309,7 @@ def _extract_narration(card: dict) -> str:
         ctype = str(content.get("type") or "").upper()
         if ctype in {"TEXT", "HEADING"}:
             txt = strip_html_tags(str(content.get("html") or ""))
+            txt = _strip_repeated_title_prefix(txt, title)
             if txt and _normalize_for_dedupe(txt) != normalized_title:
                 _append_part(txt)
             continue
@@ -300,31 +346,6 @@ def _extract_narration(card: dict) -> str:
     if narration and narration[-1] not in ".!?":
         narration += "."
     return narration
-
-
-def _truncate_for_log(text: str, max_chars: int) -> str:
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-    return text[: max_chars - 18].rstrip() + "... [truncated]"
-
-
-def _log_tts_input_payload(request_id: str, card_num: int, card: dict, narration: str) -> None:
-    if not bool(getattr(config, "LOG_TTS_INPUT", False)):
-        return
-    max_chars = max(200, int(getattr(config, "LOG_TTS_INPUT_MAX_CHARS", 1200)))
-    title = str(card.get("title") or "").strip() or "(no title)"
-    compact = re.sub(r"\s+", " ", narration).strip()
-    preview = _truncate_for_log(compact, max_chars)
-    logger.info(
-        "[TTS_INPUT] request_id=%s card=%d chars=%d title=%s text=%s",
-        request_id,
-        card_num,
-        len(compact),
-        title,
-        preview,
-    )
-
-
 def _is_youtube_url(value: str) -> bool:
     try:
         host = (urlparse(value).netloc or "").lower()
@@ -731,7 +752,6 @@ def _upload_video_to_gcs(local_path: str, request_id: str) -> str | None:
 async def _process_card(
     card: dict,
     card_num: int,
-    request_id: str,
     tmp_dir: Path,
     render_sem: asyncio.Semaphore,
     tts_sem: asyncio.Semaphore,
@@ -778,8 +798,6 @@ async def _process_card(
             "video_path": None,
             "interaction": interaction,
         }
-
-    _log_tts_input_payload(request_id, card_num, card, narration)
 
     image_path = str(tmp_dir / f"slide_{card_num}.png")
     audio_path = str(tmp_dir / f"slide_{card_num}.mp3")
@@ -855,7 +873,6 @@ async def generate_video_async(
                     result = await _process_card(
                         card,
                         card_num,
-                        request_id,
                         tmp_dir,
                         render_sem,
                         tts_sem,
