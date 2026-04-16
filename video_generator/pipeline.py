@@ -285,7 +285,36 @@ def _extract_narration(card: dict) -> str:
 
         return txt
 
-    def _extract_content_text(content: dict) -> str:
+    def _extract_text_chunks_from_html(raw_html: str) -> list[str]:
+        if not isinstance(raw_html, str) or not raw_html.strip():
+            return []
+
+        # Add sentence boundaries for common block tags so TTS has clearer pauses.
+        normalized_html = unescape(raw_html)
+        normalized_html = re.sub(r"(?i)<br\s*/?>", ". ", normalized_html)
+        normalized_html = re.sub(
+            r"(?i)</(p|div|li|h1|h2|h3|h4|h5|h6|tr|section|article)>",
+            ". ",
+            normalized_html,
+        )
+
+        # Many templates put small section headings in leading <strong> tags.
+        # Insert a boundary right after the heading text.
+        normalized_html = re.sub(
+            r"(?is)(<p[^>]*>\s*<strong[^>]*>\s*[^<]{2,80}\s*</strong>)(\s*)(?=[^\s<])",
+            r"\1. ",
+            normalized_html,
+        )
+
+        text = strip_html_tags(normalized_html)
+        if not text:
+            return []
+
+        text = re.sub(r"\s+", " ", text).strip()
+        chunks = [c.strip() for c in re.split(r"(?<=[.!?;:])\s+", text) if c.strip()]
+        return chunks or [text]
+
+    def _extract_content_chunks(content: dict) -> list[str]:
         html_candidates = [
             content.get("html"),
             content.get("renderHtml"),
@@ -294,10 +323,9 @@ def _extract_narration(card: dict) -> str:
             content.get("valueHtml"),
         ]
         for raw_html in html_candidates:
-            if isinstance(raw_html, str) and raw_html.strip():
-                text = strip_html_tags(raw_html)
-                if text:
-                    return text
+            chunks = _extract_text_chunks_from_html(raw_html)
+            if chunks:
+                return chunks
 
         text_candidates = [
             content.get("text"),
@@ -312,9 +340,9 @@ def _extract_narration(card: dict) -> str:
             if isinstance(raw_text, str) and raw_text.strip():
                 text = strip_html_tags(raw_text)
                 if text:
-                    return text
+                    return [text]
 
-        return ""
+        return []
 
     normalized_parts: list[str] = []
 
@@ -339,10 +367,13 @@ def _extract_narration(card: dict) -> str:
     for content in _iter_block_contents(card.get("children") or []):
         ctype = str(content.get("type") or "").upper()
         if ctype in {"TEXT", "HEADING"}:
-            txt = _extract_content_text(content)
-            txt = _strip_repeated_title_prefix(txt, title)
-            if txt and _normalize_for_dedupe(txt) != normalized_title:
-                _append_part(txt)
+            chunks = _extract_content_chunks(content)
+            for chunk_idx, chunk_text in enumerate(chunks):
+                txt = chunk_text
+                if chunk_idx == 0:
+                    txt = _strip_repeated_title_prefix(txt, title)
+                if txt and _normalize_for_dedupe(txt) != normalized_title:
+                    _append_part(txt)
             continue
 
         if ctype == "QUIZ":
@@ -375,10 +406,13 @@ def _extract_narration(card: dict) -> str:
             continue
 
         # Fallback: some payloads use custom block types but still carry readable text.
-        fallback_text = _extract_content_text(content)
-        fallback_text = _strip_repeated_title_prefix(fallback_text, title)
-        if fallback_text and _normalize_for_dedupe(fallback_text) != normalized_title:
-            _append_part(fallback_text)
+        fallback_chunks = _extract_content_chunks(content)
+        for chunk_idx, chunk_text in enumerate(fallback_chunks):
+            fallback_text = chunk_text
+            if chunk_idx == 0:
+                fallback_text = _strip_repeated_title_prefix(fallback_text, title)
+            if fallback_text and _normalize_for_dedupe(fallback_text) != normalized_title:
+                _append_part(fallback_text)
 
     narration = ". ".join([p for p in parts if p])
     if narration and narration[-1] not in ".!?":
@@ -981,7 +1015,6 @@ async def generate_video_async(
         cursor = 0.0
         interactions: list[dict] = []
         pause_points: list[float] = []
-        first_quiz_pause_adjusted = False
         for slide_index, item in enumerate(results, start=1):
             clip_duration = float(item.get("clip_duration") or 0.0)
             start_time = cursor
@@ -992,12 +1025,10 @@ async def generate_video_async(
             interaction = item.get("interaction")
             if interaction:
                 # Default pause_time points to the start of the interaction clip.
-                # For the first quiz only, shift by +0.1s so overlay scheduling avoids t=0.
+                # For quiz clips, always shift by +0.1s to avoid edge-timing misses.
                 pause_time_base = start_time
-                if interaction.get("type") == "quiz" and not first_quiz_pause_adjusted:
-                    # Keep a small guard so the first quiz overlay is not scheduled at t=0.
+                if interaction.get("type") == "quiz":
                     pause_time_base = min(end_time, start_time + 0.1)
-                    first_quiz_pause_adjusted = True
                 pause_time = round(pause_time_base, 3)
                 interactions.append(
                     {
