@@ -832,12 +832,16 @@ async def _process_card(
     """Process one card by exactly one of 3 branches."""
     interaction = _extract_interaction_payload(card)
     if interaction and interaction.get("type") in {"quiz", "flashcard", "fill_blank"}:
-        # Branch 1: interactive card -> 0.1s silent black clip as pause-point buffer + metadata.
+        # Branch 1: interactive card -> short silent clip as pause-point buffer + metadata.
         # Without a real clip, pause_time would equal the previous clip's end_time exactly,
         # giving the frontend zero margin to intercept playback before the next clip starts.
         out = str(tmp_dir / f"slide_{card_num}.mp4")
+        interaction_clip_duration = max(
+            0.12,
+            float(getattr(config, "INTERACTION_CLIP_DURATION_SEC", 0.2)),
+        )
         async with ffmpeg_sem:
-            await _create_silent_black_clip(out, duration=0.1)
+            await _create_silent_black_clip(out, duration=interaction_clip_duration)
         return {
             "card_num": card_num,
             "video_path": out,
@@ -1025,10 +1029,16 @@ async def generate_video_async(
             interaction = item.get("interaction")
             if interaction:
                 # Default pause_time points to the start of the interaction clip.
-                # For quiz clips, always shift by +0.1s to avoid edge-timing misses.
+                # For quiz clips, shift by +0.1s but keep pause_time strictly before end_time.
                 pause_time_base = start_time
                 if interaction.get("type") == "quiz":
-                    pause_time_base = min(end_time, start_time + 0.1)
+                    quiz_offset = max(0.0, float(getattr(config, "QUIZ_PAUSE_OFFSET_SEC", 0.1)))
+                    edge_guard = max(
+                        0.001,
+                        float(getattr(config, "QUIZ_PAUSE_EDGE_GUARD_SEC", 0.01)),
+                    )
+                    pause_upper_bound = max(start_time, end_time - edge_guard)
+                    pause_time_base = min(pause_upper_bound, start_time + quiz_offset)
                 pause_time = round(pause_time_base, 3)
                 interactions.append(
                     {
