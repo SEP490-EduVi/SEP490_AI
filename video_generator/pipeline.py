@@ -285,6 +285,37 @@ def _extract_narration(card: dict) -> str:
 
         return txt
 
+    def _extract_content_text(content: dict) -> str:
+        html_candidates = [
+            content.get("html"),
+            content.get("renderHtml"),
+            content.get("rawHtml"),
+            content.get("textHtml"),
+            content.get("valueHtml"),
+        ]
+        for raw_html in html_candidates:
+            if isinstance(raw_html, str) and raw_html.strip():
+                text = strip_html_tags(raw_html)
+                if text:
+                    return text
+
+        text_candidates = [
+            content.get("text"),
+            content.get("title"),
+            content.get("label"),
+            content.get("description"),
+            content.get("value"),
+            content.get("caption"),
+            content.get("content"),
+        ]
+        for raw_text in text_candidates:
+            if isinstance(raw_text, str) and raw_text.strip():
+                text = strip_html_tags(raw_text)
+                if text:
+                    return text
+
+        return ""
+
     normalized_parts: list[str] = []
 
     def _append_part(value: str) -> None:
@@ -308,7 +339,7 @@ def _extract_narration(card: dict) -> str:
     for content in _iter_block_contents(card.get("children") or []):
         ctype = str(content.get("type") or "").upper()
         if ctype in {"TEXT", "HEADING"}:
-            txt = strip_html_tags(str(content.get("html") or ""))
+            txt = _extract_content_text(content)
             txt = _strip_repeated_title_prefix(txt, title)
             if txt and _normalize_for_dedupe(txt) != normalized_title:
                 _append_part(txt)
@@ -341,6 +372,13 @@ def _extract_narration(card: dict) -> str:
             sentence = str(content.get("sentence") or "").strip()
             if sentence:
                 _append_part(re.sub(r"\[.*?\]", "chỗ trống", sentence))
+            continue
+
+        # Fallback: some payloads use custom block types but still carry readable text.
+        fallback_text = _extract_content_text(content)
+        fallback_text = _strip_repeated_title_prefix(fallback_text, title)
+        if fallback_text and _normalize_for_dedupe(fallback_text) != normalized_title:
+            _append_part(fallback_text)
 
     narration = ". ".join([p for p in parts if p])
     if narration and narration[-1] not in ".!?":
