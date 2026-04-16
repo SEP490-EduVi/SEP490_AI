@@ -235,30 +235,51 @@ def _extract_video_source(card: dict) -> dict | None:
 
 def _extract_narration(card: dict) -> str:
     parts: list[str] = []
+
+    def _normalize_for_dedupe(value: str) -> str:
+        compact = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        return re.sub(r"^[\W_]+|[\W_]+$", "", compact)
+
+    normalized_parts: list[str] = []
+
+    def _append_part(value: str) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        normalized = _normalize_for_dedupe(text)
+        if not normalized:
+            return
+        if normalized_parts and normalized_parts[-1] == normalized:
+            return
+        parts.append(text)
+        normalized_parts.append(normalized)
+
     title = str(card.get("title") or "").strip()
     if title:
-        parts.append(title)
+        _append_part(title)
+
+    normalized_title = _normalize_for_dedupe(title)
 
     for content in _iter_block_contents(card.get("children") or []):
         ctype = str(content.get("type") or "").upper()
         if ctype in {"TEXT", "HEADING"}:
             txt = strip_html_tags(str(content.get("html") or ""))
-            if txt and txt != title:
-                parts.append(txt)
+            if txt and _normalize_for_dedupe(txt) != normalized_title:
+                _append_part(txt)
             continue
 
         if ctype == "QUIZ":
             for q in content.get("questions") or []:
                 q_text = str((q or {}).get("question") or "").strip()
                 if q_text:
-                    parts.append(q_text)
+                    _append_part(q_text)
                 for opt in (q or {}).get("options") or []:
                     if isinstance(opt, dict):
                         o = str(opt.get("text") or "").strip()
                     else:
                         o = str(opt).strip()
                     if o:
-                        parts.append(o)
+                        _append_part(o)
             continue
 
         if ctype == "FLASHCARD":
@@ -267,13 +288,13 @@ def _extract_narration(card: dict) -> str:
                 for item in cards:
                     front = str((item or {}).get("front") or "").strip()
                     if front:
-                        parts.append(front)
+                        _append_part(front)
             continue
 
         if ctype == "FILL_BLANK":
             sentence = str(content.get("sentence") or "").strip()
             if sentence:
-                parts.append(re.sub(r"\[.*?\]", "chỗ trống", sentence))
+                _append_part(re.sub(r"\[.*?\]", "chỗ trống", sentence))
 
     narration = ". ".join([p for p in parts if p])
     if narration and narration[-1] not in ".!?":
@@ -871,6 +892,7 @@ async def generate_video_async(
         cursor = 0.0
         interactions: list[dict] = []
         pause_points: list[float] = []
+        first_quiz_pause_adjusted = False
         for slide_index, item in enumerate(results, start=1):
             clip_duration = float(item.get("clip_duration") or 0.0)
             start_time = cursor
@@ -880,10 +902,14 @@ async def generate_video_async(
 
             interaction = item.get("interaction")
             if interaction:
-                # pause_time points to the START of the interaction clip so the frontend
-                # has the full 0.1 s clip duration as a buffer before the next content
-                # clip begins.  Using end_time here would give zero margin.
-                pause_time = round(start_time, 3)
+                # Default pause_time points to the start of the interaction clip.
+                # For the first quiz only, shift by +0.1s so overlay scheduling avoids t=0.
+                pause_time_base = start_time
+                if interaction.get("type") == "quiz" and not first_quiz_pause_adjusted:
+                    # Keep a small guard so the first quiz overlay is not scheduled at t=0.
+                    pause_time_base = min(end_time, start_time + 0.1)
+                    first_quiz_pause_adjusted = True
+                pause_time = round(pause_time_base, 3)
                 interactions.append(
                     {
                         "type": interaction["type"],
