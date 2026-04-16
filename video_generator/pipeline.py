@@ -302,6 +302,29 @@ def _extract_narration(card: dict) -> str:
     return narration
 
 
+def _truncate_for_log(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[: max_chars - 18].rstrip() + "... [truncated]"
+
+
+def _log_tts_input_payload(request_id: str, card_num: int, card: dict, narration: str) -> None:
+    if not bool(getattr(config, "LOG_TTS_INPUT", False)):
+        return
+    max_chars = max(200, int(getattr(config, "LOG_TTS_INPUT_MAX_CHARS", 1200)))
+    title = str(card.get("title") or "").strip() or "(no title)"
+    compact = re.sub(r"\s+", " ", narration).strip()
+    preview = _truncate_for_log(compact, max_chars)
+    logger.info(
+        "[TTS_INPUT] request_id=%s card=%d chars=%d title=%s text=%s",
+        request_id,
+        card_num,
+        len(compact),
+        title,
+        preview,
+    )
+
+
 def _is_youtube_url(value: str) -> bool:
     try:
         host = (urlparse(value).netloc or "").lower()
@@ -708,6 +731,7 @@ def _upload_video_to_gcs(local_path: str, request_id: str) -> str | None:
 async def _process_card(
     card: dict,
     card_num: int,
+    request_id: str,
     tmp_dir: Path,
     render_sem: asyncio.Semaphore,
     tts_sem: asyncio.Semaphore,
@@ -754,6 +778,8 @@ async def _process_card(
             "video_path": None,
             "interaction": interaction,
         }
+
+    _log_tts_input_payload(request_id, card_num, card, narration)
 
     image_path = str(tmp_dir / f"slide_{card_num}.png")
     audio_path = str(tmp_dir / f"slide_{card_num}.mp3")
@@ -826,7 +852,15 @@ async def generate_video_async(
                 card_num = idx + 1
                 card = cards[idx]
                 try:
-                    result = await _process_card(card, card_num, tmp_dir, render_sem, tts_sem, ffmpeg_sem)
+                    result = await _process_card(
+                        card,
+                        card_num,
+                        request_id,
+                        tmp_dir,
+                        render_sem,
+                        tts_sem,
+                        ffmpeg_sem,
+                    )
                 except Exception as exc:
                     logger.error("Card %d failed, skipping: %s", card_num, exc)
                     result = {"card_num": card_num, "video_path": None, "interaction": None}

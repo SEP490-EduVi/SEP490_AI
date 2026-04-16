@@ -71,3 +71,7 @@ CLEANUP_BROWSER_EACH_REQUEST = (
 # TTS retry
 TTS_MAX_RETRIES = int(os.getenv("TTS_MAX_RETRIES", "3"))
 TTS_RETRY_DELAY_SEC = float(os.getenv("TTS_RETRY_DELAY_SEC", "0.8"))
+
+# Debug logs for TTS input payload.
+LOG_TTS_INPUT = os.getenv("LOG_TTS_INPUT", "false").strip().lower() == "true"
+LOG_TTS_INPUT_MAX_CHARS = int(os.getenv("LOG_TTS_INPUT_MAX_CHARS", "1200"))
