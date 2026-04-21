@@ -838,8 +838,16 @@ async def _process_card(
         out = str(tmp_dir / f"slide_{card_num}.mp4")
         interaction_clip_duration = max(
             0.12,
-            float(getattr(config, "INTERACTION_CLIP_DURATION_SEC", 0.2)),
+            float(getattr(config, "INTERACTION_CLIP_DURATION_SEC", 1.0)),
         )
+        if interaction.get("type") == "quiz":
+            # Keep quiz clip long enough so pause_time can stay ~1s after clip start.
+            quiz_offset = max(0.0, float(getattr(config, "QUIZ_PAUSE_OFFSET_SEC", 1.0)))
+            edge_guard = max(
+                0.001,
+                float(getattr(config, "QUIZ_PAUSE_EDGE_GUARD_SEC", 1.0)),
+            )
+            interaction_clip_duration = max(interaction_clip_duration, quiz_offset + edge_guard + 0.05)
         async with ffmpeg_sem:
             await _create_silent_black_clip(out, duration=interaction_clip_duration)
         return {
@@ -1032,10 +1040,10 @@ async def generate_video_async(
                 # For quiz clips, shift by +0.1s but keep pause_time strictly before end_time.
                 pause_time_base = start_time
                 if interaction.get("type") == "quiz":
-                    quiz_offset = max(0.0, float(getattr(config, "QUIZ_PAUSE_OFFSET_SEC", 0.1)))
+                    quiz_offset = max(0.0, float(getattr(config, "QUIZ_PAUSE_OFFSET_SEC", 1.0)))
                     edge_guard = max(
                         0.001,
-                        float(getattr(config, "QUIZ_PAUSE_EDGE_GUARD_SEC", 0.01)),
+                        float(getattr(config, "QUIZ_PAUSE_EDGE_GUARD_SEC", 1.0)),
                     )
                     pause_upper_bound = max(start_time, end_time - edge_guard)
                     pause_time_base = min(pause_upper_bound, start_time + quiz_offset)
