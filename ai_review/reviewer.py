@@ -1,0 +1,402 @@
+"""Core file review logic for verification and material flows."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import mimetypes
+import os
+import re
+from dataclasses import dataclass
+from typing import Any
+
+import cv2
+from google import genai
+from google.genai import types
+from docx import Document
+from PIL import Image, UnidentifiedImageError
+from pypdf import PdfReader
+
+from config import Config
+
+
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = (
+    "You are EduVi File Review AI for expert verification and teaching material review. "
+    "Return JSON only. Be strict, concise, and deterministic. "
+    "If rejecting, provide one clear rejectionReason in Vietnamese. "
+    "If accepting, provide one short Vietnamese summary."
+)
+
+@dataclass
+class ReviewDecision:
+    is_valid: bool
+    rejection_reason: str | None
+    summary: str
+
+
+@dataclass
+class FileDiagnostics:
+    extension: str
+    size_bytes: int
+    readable: bool
+    extracted_text: str
+    media_type: str
+
+
+def _make_client() -> genai.Client:
+    if Config.HELICONE_API_KEY:
+        loc = Config.VERTEX_AI_LOCATION
+        target_host = "aiplatform.googleapis.com" if loc == "global" else f"{loc}-aiplatform.googleapis.com"
+        return genai.Client(
+            vertexai=True,
+            project=Config.GOOGLE_CLOUD_PROJECT,
+            location=loc,
+            http_options=types.HttpOptions(
+                base_url="https://gateway.helicone.ai",
+                headers={
+                    "Helicone-Auth": f"Bearer {Config.HELICONE_API_KEY}",
+                    "Helicone-Target-Url": f"https://{target_host}",
+                },
+            ),
+        )
+
+    return genai.Client(
+        vertexai=True,
+        project=Config.GOOGLE_CLOUD_PROJECT,
+        location=Config.VERTEX_AI_LOCATION,
+    )
+
+
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        _client = _make_client()
+    return _client
+
+
+def _extract_pdf_text(path: str, max_pages: int = 12) -> str:
+    reader = PdfReader(path)
+    parts: list[str] = []
+    for page in reader.pages[:max_pages]:
+        parts.append(page.extract_text() or "")
+    return "\n".join(parts).strip()
+
+
+def _extract_docx_text(path: str) -> str:
+    doc = Document(path)
+    return "\n".join(p.text for p in doc.paragraphs).strip()
+
+
+def _extract_txt_text(path: str) -> str:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read().strip()
+
+
+def _laplacian_variance(image) -> float:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _image_is_clear(path: str) -> bool:
+    image = cv2.imread(path)
+    if image is None:
+        return False
+    h, w = image.shape[:2]
+    if min(h, w) < 500:
+        return False
+    return _laplacian_variance(image) >= 35.0
+
+
+def _video_is_playable(path: str) -> bool:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return False
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+    ok, _frame = cap.read()
+    cap.release()
+    if not ok:
+        return False
+    if frame_count <= 0 and fps <= 0:
+        return False
+    return True
+
+
+def inspect_file(local_path: str) -> FileDiagnostics:
+    ext = os.path.splitext(local_path)[1].lower()
+    size_bytes = os.path.getsize(local_path)
+    text = ""
+    readable = size_bytes > 0
+
+    media_type = "unknown"
+
+    if ext == ".pdf":
+        media_type = "document"
+        text = _extract_pdf_text(local_path)
+        readable = readable and bool(text.strip())
+    elif ext == ".docx":
+        media_type = "document"
+        text = _extract_docx_text(local_path)
+        readable = readable and bool(text.strip())
+    elif ext == ".txt":
+        media_type = "document"
+        text = _extract_txt_text(local_path)
+        readable = readable and bool(text.strip())
+    elif ext in IMAGE_EXTENSIONS:
+        media_type = "image"
+        try:
+            with Image.open(local_path) as img:
+                img.verify()
+            readable = readable and _image_is_clear(local_path)
+        except (UnidentifiedImageError, OSError, ValueError):
+            readable = False
+    elif ext in VIDEO_EXTENSIONS:
+        media_type = "video"
+        readable = readable and _video_is_playable(local_path)
+    else:
+        readable = False
+
+    return FileDiagnostics(
+        extension=ext,
+        size_bytes=size_bytes,
+        readable=readable,
+        extracted_text=text,
+        media_type=media_type,
+    )
+
+
+def _parse_json_response(raw: str) -> dict[str, Any]:
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", (raw or "").strip())
+    data = json.loads(cleaned)
+    if not isinstance(data, dict):
+        raise ValueError("AI response is not a JSON object")
+    return data
+
+
+def _build_verification_prompt(payload: dict[str, Any], diag: FileDiagnostics) -> str:
+    extracted_text = (diag.extracted_text or "")[: Config.MAX_EVIDENCE_CHARS]
+    return (
+        "Nhiem vu: Danh gia verification cho chung chi/bang cap cua expert.\n"
+        "Dieu kien dat:\n"
+        "- Co thong tin cot loi: ten chung chi, to chuc cap, ngay cap/han.\n"
+        "- So chung chi/so vao so la thong tin bo sung (neu co), KHONG duoc coi la dieu kien bat buoc de reject mot minh.\n"
+        "- OCR/van ban du ro de xac minh, khong mo/crop qua muc.\n\n"
+        "NGUYEN TAC QUAN TRONG:\n"
+        "- Neu ten chung chi + to chuc cap + ngay cap/han van doc duoc, thi phai chap nhan (isValid=true) du so hieu co the mo.\n"
+        "- Chi reject khi thieu thong tin cot loi hoac tai lieu qua mo/khong du can cu xac minh.\n\n"
+        "Neu KHONG dat: isValid=false va rejectionReason bat buoc.\n"
+        "Neu dat: isValid=true, rejectionReason=null, summary ngan gon.\n"
+        "Chi tra ve JSON object dung schema:\n"
+        "{\n"
+        '  "isValid": true|false,\n'
+        '  "rejectionReason": "..." | null,\n'
+        '  "summary": "..."\n'
+        "}\n\n"
+        "INPUT:\n"
+        f"description: {payload.get('description')}\n"
+        f"fileName: {payload.get('fileName') or payload.get('file_name')}\n"
+        f"contentType: {payload.get('contentType') or payload.get('content_type')}\n"
+        f"extension: {diag.extension}\n"
+        f"mediaType: {diag.media_type}\n"
+        f"sizeBytes: {diag.size_bytes}\n"
+        f"readable: {diag.readable}\n"
+        "extractedText:\n"
+        f"{extracted_text}\n"
+    )
+
+
+def _build_material_prompt(payload: dict[str, Any], diag: FileDiagnostics) -> str:
+    extracted_text = (diag.extracted_text or "")[: Config.MAX_EVIDENCE_CHARS]
+    return (
+        "Nhiem vu: Danh gia material expert upload.\n"
+        "Dieu kien dat:\n"
+        "- File xem duoc, khong hong, dung dinh dang.\n"
+        "- Noi dung phu hop subjectCode/gradeCode (neu co).\n"
+        "- Noi dung dung chu de title/description.\n"
+        "- Khong chua noi dung sai lech nghiem trong hoac khong phu hop giao duc.\n\n"
+        "Neu KHONG dat: isValid=false va rejectionReason bat buoc.\n"
+        "Neu dat: isValid=true, rejectionReason=null, summary ngan gon.\n"
+        "Chi tra ve JSON object dung schema:\n"
+        "{\n"
+        '  "isValid": true|false,\n'
+        '  "rejectionReason": "..." | null,\n'
+        '  "summary": "..."\n'
+        "}\n\n"
+        "INPUT:\n"
+        f"title: {payload.get('title')}\n"
+        f"description: {payload.get('description')}\n"
+        f"subjectCode: {payload.get('subjectCode') or payload.get('subject_code')}\n"
+        f"gradeCode: {payload.get('gradeCode') or payload.get('grade_code')}\n"
+        f"fileName: {payload.get('fileName') or payload.get('file_name')}\n"
+        f"contentType: {payload.get('contentType') or payload.get('content_type')}\n"
+        f"extension: {diag.extension}\n"
+        f"mediaType: {diag.media_type}\n"
+        f"sizeBytes: {diag.size_bytes}\n"
+        f"readable: {diag.readable}\n"
+        "extractedText:\n"
+        f"{extracted_text}\n"
+    )
+
+
+def _guess_mime_type(path: str) -> str:
+    guessed, _enc = mimetypes.guess_type(path)
+    return guessed or "application/octet-stream"
+
+
+async def _generate_with_retry(contents: Any) -> str:
+    client = _get_client()
+    attempts = max(1, Config.AI_RETRY_COUNT + 1)
+    last_exc: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=Config.GEMINI_MODEL,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        temperature=0,
+                        response_mime_type="application/json",
+                    ),
+                ),
+                timeout=Config.AI_TIMEOUT_SEC,
+            )
+            return response.text
+        except Exception as exc:  # pylint: disable=broad-except
+            last_exc = exc
+            logger.warning(
+                "AI call failed attempt %d/%d: %s",
+                attempt,
+                attempts,
+                type(exc).__name__,
+            )
+            if attempt < attempts:
+                await asyncio.sleep(Config.AI_RETRY_BACKOFF_SEC * attempt)
+
+    assert last_exc is not None
+    raise last_exc
+
+
+async def _evaluate_with_ai_multimodal(prompt: str, local_path: str, diag: FileDiagnostics) -> dict[str, Any]:
+    contents: Any = prompt
+
+    # For image files, provide raw bytes so Gemini can directly read certificate text.
+    if diag.media_type == "image":
+        with open(local_path, "rb") as f:
+            image_bytes = f.read()
+        contents = [
+            prompt,
+            types.Part.from_bytes(data=image_bytes, mime_type=_guess_mime_type(local_path)),
+        ]
+
+    raw = await _generate_with_retry(contents)
+    return _parse_json_response(raw)
+
+
+def _coerce_ai_decision(ai_data: dict[str, Any]) -> ReviewDecision:
+    is_valid = bool(ai_data.get("isValid", False))
+    rejection_reason = ai_data.get("rejectionReason")
+    summary = str(ai_data.get("summary") or "").strip()
+
+    if is_valid:
+        return ReviewDecision(
+            is_valid=True,
+            rejection_reason=None,
+            summary=summary or "File hop le, dat dieu kien duyet so bo.",
+        )
+
+    reason_text = str(rejection_reason or "").strip()
+    return ReviewDecision(
+        is_valid=False,
+        rejection_reason=reason_text or "Khong dat tieu chi duyet tu dong.",
+        summary=summary or "Khong du dieu kien duyet tu dong",
+    )
+
+
+def _is_optional_serial_only_rejection(reason: str) -> bool:
+    normalized = reason.lower()
+    has_serial_context = any(
+        token in normalized for token in ["so hieu", "so vao so", "ma chung chi", "serial", "certificate"]
+    )
+    has_unreadable_context = any(
+        token in normalized for token in ["mo", "khong doc", "khong the doc", "khong ro"]
+    )
+    has_hard_missing_core = any(
+        token in normalized
+        for token in ["to chuc cap", "ngay cap", "ten chung chi", "thieu thong tin cot loi"]
+    )
+    return has_serial_context and has_unreadable_context and not has_hard_missing_core
+
+
+def _stabilize_verification_decision(decision: ReviewDecision) -> ReviewDecision:
+    # Guardrail: do not reject solely because optional serial/registry number is unclear.
+    if decision.is_valid:
+        return decision
+
+    if decision.rejection_reason and _is_optional_serial_only_rejection(decision.rejection_reason):
+        return ReviewDecision(
+            is_valid=True,
+            rejection_reason=None,
+            summary="Chung chi dat dieu kien xac minh co ban; thong tin serial/so vao so chua ro nen de nghi staff kiem tra bo sung.",
+        )
+
+    return decision
+
+
+def _tech_fail_decision(diag: FileDiagnostics) -> ReviewDecision | None:
+    if diag.readable:
+        return None
+    return ReviewDecision(
+        is_valid=False,
+        rejection_reason="File hong, mo hoac khong doc duoc noi dung de danh gia.",
+        summary="Khong du dieu kien duyet tu dong",
+    )
+
+
+async def evaluate_request(payload: dict[str, Any], local_path: str) -> ReviewDecision:
+    review_kind = str(payload.get("reviewKind") or payload.get("review_kind") or "").strip().lower()
+    diag = inspect_file(local_path)
+
+    tech_fail = _tech_fail_decision(diag)
+    if tech_fail is not None:
+        return tech_fail
+
+    try:
+        if review_kind == "verification":
+            prompt = _build_verification_prompt(payload, diag)
+            ai_data = await _evaluate_with_ai_multimodal(prompt, local_path, diag)
+            return _stabilize_verification_decision(_coerce_ai_decision(ai_data))
+
+        if review_kind == "material":
+            prompt = _build_material_prompt(payload, diag)
+            ai_data = await _evaluate_with_ai_multimodal(prompt, local_path, diag)
+            return _coerce_ai_decision(ai_data)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("AI evaluation failed")
+        if isinstance(exc, asyncio.TimeoutError):
+            return ReviewDecision(
+                is_valid=False,
+                rejection_reason="He thong AI qua thoi gian phan hoi, vui long thu lai.",
+                summary="Khong du dieu kien duyet tu dong",
+            )
+        return ReviewDecision(
+            is_valid=False,
+            rejection_reason="He thong AI tam thoi khong danh gia duoc tai lieu.",
+            summary=f"Danh gia tu dong that bai: {type(exc).__name__}",
+        )
+
+    return ReviewDecision(
+        is_valid=False,
+        rejection_reason="reviewKind khong hop le. Chi ho tro verification hoac material.",
+        summary="Khong du dieu kien duyet tu dong",
+    )
