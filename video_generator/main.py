@@ -315,6 +315,8 @@ async def _on_message(
                 "duration": result.get("duration", 0.0),
                 "interactions": result.get("interactions", []),
                 "pausePoints": result.get("pause_points", []),
+                "tableOfContents": result.get("table_of_contents", []),
+                "table_of_contents": result.get("table_of_contents", []),
             }
 
             await _publish_progress(

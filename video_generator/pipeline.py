@@ -418,6 +418,51 @@ def _extract_narration(card: dict) -> str:
     if narration and narration[-1] not in ".!?":
         narration += "."
     return narration
+
+
+def _extract_card_index_label(card: dict, card_num: int) -> str:
+    """Extract a short index label for one card."""
+    title = str(card.get("title") or "").strip()
+    if title:
+        return title
+
+    for content in _iter_block_contents(card.get("children") or []):
+        ctype = str(content.get("type") or "").upper()
+        if ctype not in {"HEADING", "TEXT"}:
+            continue
+
+        candidates = [
+            content.get("title"),
+            content.get("text"),
+            content.get("label"),
+            content.get("description"),
+            content.get("value"),
+            content.get("html"),
+            content.get("renderHtml"),
+        ]
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            plain = strip_html_tags(unescape(candidate))
+            if plain:
+                return plain[:100].strip()
+
+    return f"Slide {card_num}"
+
+
+def _build_table_of_contents(cards: list[dict]) -> list[dict]:
+    """Build ordered table-of-contents entries from lesson cards."""
+    entries: list[dict] = []
+    for card_num, card in enumerate(cards, start=1):
+        entries.append(
+            {
+                "card_index": card_num,
+                "label": _extract_card_index_label(card, card_num),
+            }
+        )
+    return entries
+
+
 def _is_youtube_url(value: str) -> bool:
     try:
         host = (urlparse(value).netloc or "").lower()
@@ -923,6 +968,7 @@ async def generate_video_async(
         cards = list(lesson.get("cards") or [])
         if not cards:
             raise ValueError("No cards found in lesson payload")
+        table_of_contents = _build_table_of_contents(cards)
 
         await _emit_progress(
             progress_callback,
@@ -1027,12 +1073,20 @@ async def generate_video_async(
         cursor = 0.0
         interactions: list[dict] = []
         pause_points: list[float] = []
+        card_timings: dict[int, dict[str, float]] = {}
         for slide_index, item in enumerate(results, start=1):
             clip_duration = float(item.get("clip_duration") or 0.0)
             start_time = cursor
             end_time = start_time + clip_duration
             if clip_duration > 0:
                 cursor = end_time
+
+            card_idx = int(item.get("card_num") or slide_index)
+            card_timings[card_idx] = {
+                "start_time": round(start_time, 3),
+                "end_time": round(end_time, 3),
+                "duration": round(max(0.0, clip_duration), 3),
+            }
 
             interaction = item.get("interaction")
             if interaction:
@@ -1061,6 +1115,55 @@ async def generate_video_async(
                 )
                 pause_points.append(pause_time)
 
+        toc_with_timeline: list[dict] = []
+        for entry in table_of_contents:
+            card_idx = int(entry.get("card_index") or 0)
+            timing = card_timings.get(card_idx, {})
+            start_time = timing.get("start_time")
+            toc_with_timeline.append(
+                {
+                    "card_index": card_idx,
+                    "label": str(entry.get("label") or "").strip() or f"Slide {card_idx}",
+                    "start_time": start_time,
+                    "end_time": timing.get("end_time"),
+                    "duration": timing.get("duration"),
+                    "seek_time": start_time,
+                }
+            )
+
+        # Expose table-of-contents as interaction items so frontend can render index
+        # from a single `interactions` collection.
+        interactions_with_index = list(interactions)
+        for toc_item in toc_with_timeline:
+            card_idx = int(toc_item.get("card_index") or 0)
+            start_time = toc_item.get("start_time")
+            if start_time is None:
+                continue
+
+            end_time = toc_item.get("end_time")
+            interactions_with_index.append(
+                {
+                    "type": "index",
+                    "slide_index": card_idx,
+                    "card_index": card_idx,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "pause_time": start_time,
+                    "payload": {
+                        "label": str(toc_item.get("label") or "").strip() or f"Slide {card_idx}",
+                        "seek_time": toc_item.get("seek_time", start_time),
+                    },
+                }
+            )
+
+        interactions_with_index.sort(
+            key=lambda item: (
+                float(item.get("start_time") or 0.0),
+                0 if item.get("type") == "index" else 1,
+                int(item.get("card_index") or 0),
+            )
+        )
+
         duration = await _get_video_duration(output_path)
 
         await _emit_progress(progress_callback, "uploading_video", 95, "Uploading final video")
@@ -1078,8 +1181,9 @@ async def generate_video_async(
             "video_local_url": local_video_url,
             "duration": duration,
             "request_id": request_id,
-            "interactions": interactions,
+            "interactions": interactions_with_index,
             "pause_points": pause_points,
+            "table_of_contents": toc_with_timeline,
         }
 
     finally:
