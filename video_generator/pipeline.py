@@ -235,6 +235,7 @@ def _extract_video_source(card: dict) -> dict | None:
 
 def _extract_narration(card: dict) -> str:
     parts: list[str] = []
+    title = str(card.get("title") or "").strip()
 
     def _normalize_for_dedupe(value: str) -> str:
         compact = re.sub(r"\s+", " ", str(value or "")).strip().lower()
@@ -284,6 +285,39 @@ def _extract_narration(card: dict) -> str:
                 return token_prefix
 
         return txt
+
+    def _normalize_title_core(value: str) -> str:
+        normalized = _normalize_for_dedupe(value)
+        if not normalized:
+            return ""
+
+        # Ignore common leading section/index markers when comparing headings.
+        normalized = re.sub(r"^(?:bai|slide|phan|muc)\s+\d+\s*", "", normalized)
+        normalized = re.sub(r"^\d+(?:\s+\d+)*\s*", "", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    normalized_title = _normalize_for_dedupe(title)
+    normalized_title_core = _normalize_title_core(title)
+
+    def _is_title_equivalent(text: str) -> bool:
+        if not normalized_title:
+            return False
+
+        normalized_text = _normalize_for_dedupe(text)
+        if not normalized_text:
+            return False
+        if normalized_text == normalized_title:
+            return True
+
+        text_core = _normalize_title_core(text)
+        if normalized_title_core and text_core and text_core == normalized_title_core:
+            return True
+
+        if normalized_title_core and text_core and len(normalized_title_core) >= 8:
+            if text_core.startswith(normalized_title_core) or normalized_title_core.startswith(text_core):
+                return True
+
+        return False
 
     def _extract_text_chunks_from_html(raw_html: str) -> list[str]:
         if not isinstance(raw_html, str) or not raw_html.strip():
@@ -353,16 +387,15 @@ def _extract_narration(card: dict) -> str:
         normalized = _normalize_for_dedupe(text)
         if not normalized:
             return
+        if parts and _is_title_equivalent(text):
+            return
         if normalized_parts and normalized_parts[-1] == normalized:
             return
         parts.append(text)
         normalized_parts.append(normalized)
 
-    title = str(card.get("title") or "").strip()
     if title:
         _append_part(title)
-
-    normalized_title = _normalize_for_dedupe(title)
 
     for content in _iter_block_contents(card.get("children") or []):
         ctype = str(content.get("type") or "").upper()
@@ -372,7 +405,7 @@ def _extract_narration(card: dict) -> str:
                 txt = chunk_text
                 if chunk_idx == 0:
                     txt = _strip_repeated_title_prefix(txt, title)
-                if txt and _normalize_for_dedupe(txt) != normalized_title:
+                if txt and not _is_title_equivalent(txt):
                     _append_part(txt)
             continue
 
@@ -411,7 +444,7 @@ def _extract_narration(card: dict) -> str:
             fallback_text = chunk_text
             if chunk_idx == 0:
                 fallback_text = _strip_repeated_title_prefix(fallback_text, title)
-            if fallback_text and _normalize_for_dedupe(fallback_text) != normalized_title:
+            if fallback_text and not _is_title_equivalent(fallback_text):
                 _append_part(fallback_text)
 
     narration = ". ".join([p for p in parts if p])
