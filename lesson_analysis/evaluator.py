@@ -48,7 +48,7 @@ _client = _make_client()
 SYSTEM_PROMPT = (
     "You are the EduVi Pedagogical Evaluator, an AI specialized in analyzing Vietnamese "
     "lesson plans against the official National Curriculum Standards "
-    "(Chương trình Giáo dục Phổ thông 2018). "
+    "(example: Chương trình Giáo dục Phổ thông 2018). "
     "Your PRIMARY source of truth is the yeu_cau_can_dat list — the official competency "
     "requirements (Yêu cầu cần đạt) that students must achieve. "
     "Evaluate strictly whether the teacher's lesson plan TEACHES each requirement. "
@@ -92,9 +92,7 @@ EVAL_PROMPT = """
 ### OUTPUT
 Return ONLY a JSON object. No markdown fences, no extra text.
 {{
-  "detected_lesson_name": "Tên bài trong giáo án",
-  "objectives": ["Mục tiêu 1", "Mục tiêu 2"],
-  "activities": ["Hoạt động 1: mô tả ngắn", "Hoạt động 2: mô tả ngắn"],
+  "detected_lesson_name": "Tên bài trong dữ liệu đầu vào",
   "coverage_score": 85.50,
   "covered_yeu_cau": [
     {{
@@ -112,7 +110,7 @@ Return ONLY a JSON object. No markdown fences, no extra text.
   "extra_content": ["Nội dung giáo án thêm ngoài yêu cầu cần đạt"],
   "comment": "Nhận xét tổng quan ngắn gọn, mang tính xây dựng.",
   "suggestions": [
-    "Gợi ý cụ thể, khả thi để cải thiện giáo án."
+    "Gợi ý cụ thể, khả thi để cải thiện giáo án. (2-3 gợi ý)"
   ]
 }}
 """
