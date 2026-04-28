@@ -10,6 +10,11 @@
 
 ---
 
+> **⚠️ Deployment Guide Available!**
+> Trying to push these workers to the cloud or set up the full VM infrastructure with the `.NET` repo? Please read our comprehensive **[AI Deployment Guide](DEPLOYMENT_GUIDE.md)** for instructions on architecture, Docker configuration, GitHub Actions, and securely tunneling into RabbitMQ.
+
+---
+
 ## 📑 Table of Contents
 
 - [Overview](#overview)
@@ -22,6 +27,8 @@
   - [Running with Docker (Recommended)](#running-with-docker-recommended)
   - [Local Development (Without Docker)](#local-development-without-docker)
 - [Communication Protocol](#communication-protocol)
+
+---
 
 ---
 
