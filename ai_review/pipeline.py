@@ -14,8 +14,8 @@ async def run_review(payload: dict[str, Any]) -> ReviewDecision:
     if not file_url:
         return ReviewDecision(
             is_valid=False,
-            rejection_reason="Thieu fileUrl trong request.",
-            summary="Khong du dieu kien duyet tu dong",
+            rejection_reason="Thiếu fileUrl trong request.",
+            summary="Không đủ điều kiện duyệt tự động",
         )
 
     local_path = download_from_gcs(str(file_url))

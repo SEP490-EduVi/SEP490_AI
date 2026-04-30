@@ -48,12 +48,12 @@ def _build_result_message(
 
     if is_valid:
         final_rejection_reason = None
-        final_summary = (summary or "Ho so hop le, staff se xem xet de phe duyet.").strip()
+        final_summary = (summary or "Hồ sơ hợp lệ, staff sẽ xem xét để phê duyệt.").strip()
     else:
         final_rejection_reason = (
-            (rejection_reason or "Khong du dieu kien duyet tu dong.").strip()
+            (rejection_reason or "Không đủ điều kiện duyệt tự động.").strip()
         )
-        final_summary = "Khong du dieu kien duyet tu dong"
+        final_summary = "Không đủ điều kiện duyệt tự động"
 
     return {
         "taskId": task_id,
@@ -62,7 +62,7 @@ def _build_result_message(
         "entityCode": _field(payload, "entityCode", "entity_code", "EntityCode"),
         "status": "completed",
         "progress": 100,
-        "detail": "AI review completed",
+        "detail": "Đã hoàn tất đánh giá AI",
         "result": {
             "isValid": bool(is_valid),
             "rejectionReason": final_rejection_reason,
@@ -100,8 +100,8 @@ async def _on_message(
             fallback = _build_result_message(
                 payload=request,
                 is_valid=False,
-                rejection_reason="He thong khong the danh gia file tai thoi diem nay.",
-                summary="Khong du dieu kien duyet tu dong",
+                rejection_reason="Hệ thống không thể đánh giá file tại thời điểm này.",
+                summary="Không đủ điều kiện duyệt tự động",
                 fallback_task_id=message.correlation_id,
                 error=f"{type(exc).__name__}: {exc}",
             )

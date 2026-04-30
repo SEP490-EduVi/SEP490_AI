@@ -185,17 +185,17 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
 def _build_verification_prompt(payload: dict[str, Any], diag: FileDiagnostics) -> str:
     extracted_text = (diag.extracted_text or "")[: Config.MAX_EVIDENCE_CHARS]
     return (
-        "Nhiem vu: Danh gia verification cho chung chi/bang cap cua expert.\n"
-        "Dieu kien dat:\n"
-        "- Co thong tin cot loi: ten chung chi, to chuc cap, ngay cap/han.\n"
-        "- So chung chi/so vao so la thong tin bo sung (neu co), KHONG duoc coi la dieu kien bat buoc de reject mot minh.\n"
-        "- OCR/van ban du ro de xac minh, khong mo/crop qua muc.\n\n"
-        "NGUYEN TAC QUAN TRONG:\n"
-        "- Neu ten chung chi + to chuc cap + ngay cap/han van doc duoc, thi phai chap nhan (isValid=true) du so hieu co the mo.\n"
-        "- Chi reject khi thieu thong tin cot loi hoac tai lieu qua mo/khong du can cu xac minh.\n\n"
-        "Neu KHONG dat: isValid=false va rejectionReason bat buoc.\n"
-        "Neu dat: isValid=true, rejectionReason=null, summary ngan gon.\n"
-        "Chi tra ve JSON object dung schema:\n"
+        "Task: Evaluate verification for expert certificates/degrees.\n"
+        "Pass criteria:\n"
+        "- Core info present: certificate name, issuing organization, issue/expiry date.\n"
+        "- Certificate/registry number is optional (if present); it MUST NOT be the sole reason to reject.\n"
+        "- OCR/text is clear enough to verify; not overly blurred/cropped.\n\n"
+        "IMPORTANT PRINCIPLES:\n"
+        "- If certificate name + issuer + issue/expiry date are readable, accept (isValid=true) even if serial is blurry.\n"
+        "- Reject only if core info is missing or the document is too blurred to verify.\n\n"
+        "If NOT passed: isValid=false and rejectionReason is required.\n"
+        "If passed: isValid=true, rejectionReason=null, summary should be short.\n"
+        "Return JSON object with schema:\n"
         "{\n"
         '  "isValid": true|false,\n'
         '  "rejectionReason": "..." | null,\n'
@@ -217,15 +217,15 @@ def _build_verification_prompt(payload: dict[str, Any], diag: FileDiagnostics) -
 def _build_material_prompt(payload: dict[str, Any], diag: FileDiagnostics) -> str:
     extracted_text = (diag.extracted_text or "")[: Config.MAX_EVIDENCE_CHARS]
     return (
-        "Nhiem vu: Danh gia material expert upload.\n"
-        "Dieu kien dat:\n"
-        "- File xem duoc, khong hong, dung dinh dang.\n"
-        "- Noi dung phu hop subjectCode/gradeCode (neu co).\n"
-        "- Noi dung dung chu de title/description.\n"
-        "- Khong chua noi dung sai lech nghiem trong hoac khong phu hop giao duc.\n\n"
-        "Neu KHONG dat: isValid=false va rejectionReason bat buoc.\n"
-        "Neu dat: isValid=true, rejectionReason=null, summary ngan gon.\n"
-        "Chi tra ve JSON object dung schema:\n"
+        "Task: Evaluate expert uploaded material.\n"
+        "Pass criteria:\n"
+        "- File is readable, not corrupted, correct format.\n"
+        "- Content matches subjectCode/gradeCode (if provided).\n"
+        "- Content matches title/description.\n"
+        "- No severely misleading or inappropriate educational content.\n\n"
+        "If NOT passed: isValid=false and rejectionReason is required.\n"
+        "If passed: isValid=true, rejectionReason=null, summary should be short.\n"
+        "Return JSON object with schema:\n"
         "{\n"
         '  "isValid": true|false,\n'
         '  "rejectionReason": "..." | null,\n'
@@ -248,6 +248,18 @@ def _build_material_prompt(payload: dict[str, Any], diag: FileDiagnostics) -> st
 
 
 def _guess_mime_type(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    overrides = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+        ".tiff": "image/tiff",
+    }
+    if ext in overrides:
+        return overrides[ext]
+
     guessed, _enc = mimetypes.guess_type(path)
     return guessed or "application/octet-stream"
 
@@ -312,14 +324,14 @@ def _coerce_ai_decision(ai_data: dict[str, Any]) -> ReviewDecision:
         return ReviewDecision(
             is_valid=True,
             rejection_reason=None,
-            summary=summary or "File hop le, dat dieu kien duyet so bo.",
+            summary=summary or "Tài liệu hợp lệ, đạt điều kiện duyệt sơ bộ.",
         )
 
     reason_text = str(rejection_reason or "").strip()
     return ReviewDecision(
         is_valid=False,
-        rejection_reason=reason_text or "Khong dat tieu chi duyet tu dong.",
-        summary=summary or "Khong du dieu kien duyet tu dong",
+        rejection_reason=reason_text or "Không đạt tiêu chí duyệt tự động.",
+        summary=summary or "Không đủ điều kiện duyệt tự động",
     )
 
 
@@ -347,7 +359,10 @@ def _stabilize_verification_decision(decision: ReviewDecision) -> ReviewDecision
         return ReviewDecision(
             is_valid=True,
             rejection_reason=None,
-            summary="Chung chi dat dieu kien xac minh co ban; thong tin serial/so vao so chua ro nen de nghi staff kiem tra bo sung.",
+            summary=(
+                "Chứng chỉ đạt điều kiện xác minh cơ bản; thông tin serial/số vào sổ "
+                "chưa rõ nên đề nghị staff kiểm tra bổ sung."
+            ),
         )
 
     return decision
@@ -358,8 +373,8 @@ def _tech_fail_decision(diag: FileDiagnostics) -> ReviewDecision | None:
         return None
     return ReviewDecision(
         is_valid=False,
-        rejection_reason="File hong, mo hoac khong doc duoc noi dung de danh gia.",
-        summary="Khong du dieu kien duyet tu dong",
+        rejection_reason="File hỏng, mờ hoặc không đọc được nội dung để đánh giá.",
+        summary="Không đủ điều kiện duyệt tự động",
     )
 
 
@@ -386,17 +401,17 @@ async def evaluate_request(payload: dict[str, Any], local_path: str) -> ReviewDe
         if isinstance(exc, asyncio.TimeoutError):
             return ReviewDecision(
                 is_valid=False,
-                rejection_reason="He thong AI qua thoi gian phan hoi, vui long thu lai.",
-                summary="Khong du dieu kien duyet tu dong",
+                rejection_reason="Hệ thống AI quá thời gian phản hồi, vui lòng thử lại.",
+                summary="Không đủ điều kiện duyệt tự động",
             )
         return ReviewDecision(
             is_valid=False,
-            rejection_reason="He thong AI tam thoi khong danh gia duoc tai lieu.",
-            summary=f"Danh gia tu dong that bai: {type(exc).__name__}",
+            rejection_reason="Hệ thống AI tạm thời không đánh giá được tài liệu.",
+            summary=f"Đánh giá tự động thất bại: {type(exc).__name__}",
         )
 
     return ReviewDecision(
         is_valid=False,
-        rejection_reason="reviewKind khong hop le. Chi ho tro verification hoac material.",
-        summary="Khong du dieu kien duyet tu dong",
+        rejection_reason="reviewKind không hợp lệ. Chỉ hỗ trợ verification hoặc material.",
+        summary="Không đủ điều kiện duyệt tự động",
     )

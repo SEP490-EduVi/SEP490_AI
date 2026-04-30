@@ -6,6 +6,7 @@ import re
 import shutil
 import tempfile
 import time
+import unicodedata
 import uuid
 from html import unescape
 from pathlib import Path
@@ -237,8 +238,16 @@ def _extract_narration(card: dict) -> str:
     parts: list[str] = []
     title = str(card.get("title") or "").strip()
 
+    def _strip_diacritics(value: str) -> str:
+        if not value:
+            return ""
+        normalized = unicodedata.normalize("NFD", value)
+        stripped = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+        return stripped.replace("đ", "d").replace("Đ", "D")
+
     def _normalize_for_dedupe(value: str) -> str:
         compact = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+        compact = _strip_diacritics(compact)
         compact = re.sub(r"[^\w\s]", " ", compact, flags=re.UNICODE)
         compact = compact.replace("_", " ")
         return re.sub(r"\s+", " ", compact).strip()
