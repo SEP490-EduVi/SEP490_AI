@@ -103,6 +103,18 @@ def _iter_block_contents(nodes: list[dict]) -> Any:
             yield content
 
 
+def _iter_layout_block_contents(layouts: list[dict]) -> Any:
+    for layout in layouts:
+        for block in layout.get("blocks") or []:
+            content = block.get("content") or {}
+            if not isinstance(content, dict):
+                continue
+            if "type" not in content and block.get("type"):
+                content = dict(content)
+                content["type"] = block.get("type")
+            yield content
+
+
 def _extract_interaction_payload(card: dict) -> dict | None:
     title = str(card.get("title") or "").strip()
 
@@ -237,6 +249,9 @@ def _extract_video_source(card: dict) -> dict | None:
 def _extract_narration(card: dict) -> str:
     parts: list[str] = []
     title = str(card.get("title") or "").strip()
+    layout_contents = list(_iter_layout_block_contents(card.get("layouts") or []))
+    child_contents = list(_iter_block_contents(card.get("children") or []))
+    contents = layout_contents + child_contents
 
     def _strip_diacritics(value: str) -> str:
         if not value:
@@ -403,10 +418,19 @@ def _extract_narration(card: dict) -> str:
         parts.append(text)
         normalized_parts.append(normalized)
 
-    if title:
+    use_title = True
+    if layout_contents:
+        for content in layout_contents:
+            ctype = str(content.get("type") or "").upper()
+            if ctype in {"TEXT", "HEADING"}:
+                if _extract_content_chunks(content):
+                    use_title = False
+                    break
+
+    if title and use_title:
         _append_part(title)
 
-    for content in _iter_block_contents(card.get("children") or []):
+    for content in contents:
         ctype = str(content.get("type") or "").upper()
         if ctype in {"TEXT", "HEADING"}:
             chunks = _extract_content_chunks(content)
