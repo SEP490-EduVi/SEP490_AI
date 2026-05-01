@@ -131,6 +131,34 @@ def _video_is_playable(path: str) -> bool:
     return True
 
 
+def _extract_video_frames(path: str, max_frames: int = 2) -> list[bytes]:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return []
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    indices: list[int] = []
+    if frame_count > 0:
+        indices = sorted({int(frame_count * 0.1), int(frame_count * 0.6)})
+    if not indices:
+        indices = [0]
+
+    frames: list[bytes] = []
+    for idx in indices[:max_frames]:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, idx))
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+        if ok:
+            frames.append(encoded.tobytes())
+        if len(frames) >= max_frames:
+            break
+
+    cap.release()
+    return frames
+
+
 def inspect_file(local_path: str) -> FileDiagnostics:
     ext = os.path.splitext(local_path)[1].lower()
     size_bytes = os.path.getsize(local_path)
@@ -244,6 +272,7 @@ def _build_material_prompt(payload: dict[str, Any], diag: FileDiagnostics) -> st
         "- Content matches subjectCode/gradeCode (if provided).\n"
         "- Content matches title/description.\n"
         "- No severely misleading or inappropriate educational content.\n\n"
+        "For video files, use the provided keyframes as the primary visual evidence.\n\n"
         "If NOT passed: isValid=false and rejectionReason is required.\n"
         "If passed: isValid=true, rejectionReason=null, summary should be short.\n"
         "Return JSON object with schema:\n"
@@ -323,7 +352,7 @@ async def _generate_with_retry(contents: Any) -> str:
 async def _evaluate_with_ai_multimodal(prompt: str, local_path: str, diag: FileDiagnostics) -> dict[str, Any]:
     contents: Any = prompt
 
-    # For image files, provide raw bytes so Gemini can directly read certificate text.
+    # Provide image bytes so Gemini can read text or see material content.
     if diag.media_type == "image":
         with open(local_path, "rb") as f:
             image_bytes = f.read()
@@ -331,6 +360,13 @@ async def _evaluate_with_ai_multimodal(prompt: str, local_path: str, diag: FileD
             prompt,
             types.Part.from_bytes(data=image_bytes, mime_type=_guess_mime_type(local_path)),
         ]
+
+    if diag.media_type == "video":
+        frames = _extract_video_frames(local_path, max_frames=2)
+        if frames:
+            contents = [prompt]
+            for frame_bytes in frames:
+                contents.append(types.Part.from_bytes(data=frame_bytes, mime_type="image/jpeg"))
 
     raw = await _generate_with_retry(contents)
     return _parse_json_response(raw)
