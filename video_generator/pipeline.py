@@ -251,7 +251,7 @@ def _extract_narration(card: dict) -> str:
     title = str(card.get("title") or "").strip()
     layout_contents = list(_iter_layout_block_contents(card.get("layouts") or []))
     child_contents = list(_iter_block_contents(card.get("children") or []))
-    contents = layout_contents + child_contents
+    contents = layout_contents if layout_contents else child_contents
 
     def _strip_diacritics(value: str) -> str:
         if not value:
@@ -419,13 +419,12 @@ def _extract_narration(card: dict) -> str:
         normalized_parts.append(normalized)
 
     use_title = True
-    if layout_contents:
-        for content in layout_contents:
-            ctype = str(content.get("type") or "").upper()
-            if ctype in {"TEXT", "HEADING"}:
-                if _extract_content_chunks(content):
-                    use_title = False
-                    break
+    for content in contents:
+        ctype = str(content.get("type") or "").upper()
+        if ctype in {"TEXT", "HEADING"}:
+            if _extract_content_chunks(content):
+                use_title = False
+                break
 
     if title and use_title:
         _append_part(title)
