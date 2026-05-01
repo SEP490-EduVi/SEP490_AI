@@ -266,6 +266,39 @@ def _extract_narration(card: dict) -> str:
         compact = compact.replace("_", " ")
         return re.sub(r"\s+", " ", compact).strip()
 
+    roman_map = {
+        "I": "1",
+        "II": "2",
+        "III": "3",
+        "IV": "4",
+        "V": "5",
+        "VI": "6",
+        "VII": "7",
+        "VIII": "8",
+        "IX": "9",
+        "X": "10",
+        "XI": "11",
+        "XII": "12",
+        "XIII": "13",
+        "XIV": "14",
+        "XV": "15",
+        "XVI": "16",
+        "XVII": "17",
+        "XVIII": "18",
+        "XIX": "19",
+        "XX": "20",
+    }
+
+    def _replace_roman_numerals(text: str) -> str:
+        if not text:
+            return text
+
+        def repl(match: re.Match[str]) -> str:
+            token = match.group(0)
+            return roman_map.get(token, token)
+
+        return re.sub(r"\b[IVX]{1,4}\b", repl, text)
+
 
     def _extract_text_chunks_from_html(raw_html: str) -> list[str]:
         if not isinstance(raw_html, str) or not raw_html.strip():
@@ -332,6 +365,7 @@ def _extract_narration(card: dict) -> str:
         text = str(value or "").strip()
         if not text:
             return
+        text = _replace_roman_numerals(text)
         normalized = _normalize_for_dedupe(text)
         if not normalized:
             return
