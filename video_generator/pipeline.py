@@ -248,7 +248,6 @@ def _extract_video_source(card: dict) -> dict | None:
 
 def _extract_narration(card: dict) -> str:
     parts: list[str] = []
-    title = str(card.get("title") or "").strip()
     layout_contents = list(_iter_layout_block_contents(card.get("layouts") or []))
     child_contents = list(_iter_block_contents(card.get("children") or []))
     contents = layout_contents if layout_contents else child_contents
@@ -267,81 +266,6 @@ def _extract_narration(card: dict) -> str:
         compact = compact.replace("_", " ")
         return re.sub(r"\s+", " ", compact).strip()
 
-    def _strip_repeated_title_prefix(text: str, title_text: str) -> str:
-        txt = str(text or "").strip()
-        title_clean = str(title_text or "").strip()
-        if not txt or not title_clean:
-            return txt
-
-        normalized_txt = _normalize_for_dedupe(txt)
-        normalized_title_local = _normalize_for_dedupe(title_clean)
-        if len(normalized_title_local) < 6 or not normalized_txt.startswith(normalized_title_local):
-            return txt
-
-        # Prefer exact prefix strip first (keeps the rest of sentence unchanged).
-        direct_prefix = re.sub(
-            rf"^\s*{re.escape(title_clean)}\s*[:\-\u2013\u2014,.;!?]*\s*",
-            "",
-            txt,
-            count=1,
-            flags=re.IGNORECASE,
-        ).strip()
-        if direct_prefix:
-            return direct_prefix
-
-        # Fallback for punctuation/spacing variants between title and body text.
-        tokens = re.findall(r"\w+", title_clean, flags=re.UNICODE)
-        if len(tokens) >= 2:
-            sep = r"[\s\-\u2013\u2014:;,.!?()\"'_/]+"
-            token_prefix_pattern = (
-                r"^\s*"
-                + sep.join(re.escape(token) for token in tokens)
-                + r"(?:\s*[:\-\u2013\u2014,.;!?)]\s*)?"
-            )
-            token_prefix = re.sub(
-                token_prefix_pattern,
-                "",
-                txt,
-                count=1,
-                flags=re.IGNORECASE,
-            ).strip()
-            if token_prefix:
-                return token_prefix
-
-        return txt
-
-    def _normalize_title_core(value: str) -> str:
-        normalized = _normalize_for_dedupe(value)
-        if not normalized:
-            return ""
-
-        # Ignore common leading section/index markers when comparing headings.
-        normalized = re.sub(r"^(?:bai|slide|phan|muc)\s+\d+\s*", "", normalized)
-        normalized = re.sub(r"^\d+(?:\s+\d+)*\s*", "", normalized)
-        return re.sub(r"\s+", " ", normalized).strip()
-
-    normalized_title = _normalize_for_dedupe(title)
-    normalized_title_core = _normalize_title_core(title)
-
-    def _is_title_equivalent(text: str) -> bool:
-        if not normalized_title:
-            return False
-
-        normalized_text = _normalize_for_dedupe(text)
-        if not normalized_text:
-            return False
-        if normalized_text == normalized_title:
-            return True
-
-        text_core = _normalize_title_core(text)
-        if normalized_title_core and text_core and text_core == normalized_title_core:
-            return True
-
-        if normalized_title_core and text_core and len(normalized_title_core) >= 8:
-            if text_core.startswith(normalized_title_core) or normalized_title_core.startswith(text_core):
-                return True
-
-        return False
 
     def _extract_text_chunks_from_html(raw_html: str) -> list[str]:
         if not isinstance(raw_html, str) or not raw_html.strip():
@@ -411,8 +335,6 @@ def _extract_narration(card: dict) -> str:
         normalized = _normalize_for_dedupe(text)
         if not normalized:
             return
-        if parts and _is_title_equivalent(text):
-            return
         if normalized_parts and normalized_parts[-1] == normalized:
             return
         parts.append(text)
@@ -423,11 +345,8 @@ def _extract_narration(card: dict) -> str:
         if ctype in {"TEXT", "HEADING"}:
             chunks = _extract_content_chunks(content)
             for chunk_idx, chunk_text in enumerate(chunks):
-                txt = chunk_text
-                if chunk_idx == 0:
-                    txt = _strip_repeated_title_prefix(txt, title)
-                if txt and not _is_title_equivalent(txt):
-                    _append_part(txt)
+                if chunk_text:
+                    _append_part(chunk_text)
             continue
 
         if ctype == "QUIZ":
@@ -462,11 +381,8 @@ def _extract_narration(card: dict) -> str:
         # Fallback: some payloads use custom block types but still carry readable text.
         fallback_chunks = _extract_content_chunks(content)
         for chunk_idx, chunk_text in enumerate(fallback_chunks):
-            fallback_text = chunk_text
-            if chunk_idx == 0:
-                fallback_text = _strip_repeated_title_prefix(fallback_text, title)
-            if fallback_text and not _is_title_equivalent(fallback_text):
-                _append_part(fallback_text)
+            if chunk_text:
+                _append_part(chunk_text)
 
     narration = ". ".join([p for p in parts if p])
     if narration and narration[-1] not in ".!?":
