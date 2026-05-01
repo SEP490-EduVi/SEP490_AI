@@ -184,15 +184,35 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
 
 def _build_verification_prompt(payload: dict[str, Any], diag: FileDiagnostics) -> str:
     extracted_text = (diag.extracted_text or "")[: Config.MAX_EVIDENCE_CHARS]
+    doc_type_hint = (
+        payload.get("documentType")
+        or payload.get("document_type")
+        or payload.get("fileType")
+        or payload.get("file_type")
+        or payload.get("docType")
+        or payload.get("doc_type")
+        or payload.get("credentialType")
+        or payload.get("credential_type")
+        or payload.get("verificationType")
+        or payload.get("verification_type")
+    )
     return (
-        "Task: Evaluate verification for expert certificates/degrees.\n"
-        "Pass criteria:\n"
-        "- Core info present: certificate name, issuing organization, issue/expiry date.\n"
-        "- Certificate/registry number is optional (if present); it MUST NOT be the sole reason to reject.\n"
-        "- OCR/text is clear enough to verify; not overly blurred/cropped.\n\n"
-        "IMPORTANT PRINCIPLES:\n"
-        "- If certificate name + issuer + issue/expiry date are readable, accept (isValid=true) even if serial is blurry.\n"
-        "- Reject only if core info is missing or the document is too blurred to verify.\n\n"
+        "Task: Evaluate verification for expert credentials.\n"
+        "Document types:\n"
+        "- Certificate (chung chi)\n"
+        "- Degree/Diploma (bang cap)\n"
+        "First decide which type applies (use docTypeHint/fileType if provided). Then apply the matching criteria.\n\n"
+        "Pass criteria (Certificate):\n"
+        "- Core info present: certificate name, issuing organization, issue date (expiry date if present).\n"
+        "- Certificate/registry number is optional; it MUST NOT be the sole reason to reject.\n\n"
+        "Pass criteria (Degree/Diploma):\n"
+        "- Core info present: institution/university name, degree title, graduation/issue date.\n"
+        "- Major/field is helpful if present but NOT required.\n\n"
+        "General rules:\n"
+        "- OCR/text is clear enough to verify; not overly blurred/cropped.\n"
+        "- If document type is unclear but core info for either type is readable, accept.\n"
+        "- Reject only if core info is missing or the document is too blurred to verify.\n"
+        "- If multiple pages exist, evaluate any page that contains the credential.\n\n"
         "If NOT passed: isValid=false and rejectionReason is required.\n"
         "If passed: isValid=true, rejectionReason=null, summary should be short.\n"
         "Return JSON object with schema:\n"
@@ -205,6 +225,7 @@ def _build_verification_prompt(payload: dict[str, Any], diag: FileDiagnostics) -
         f"description: {payload.get('description')}\n"
         f"fileName: {payload.get('fileName') or payload.get('file_name')}\n"
         f"contentType: {payload.get('contentType') or payload.get('content_type')}\n"
+        f"docTypeHint: {doc_type_hint}\n"
         f"extension: {diag.extension}\n"
         f"mediaType: {diag.media_type}\n"
         f"sizeBytes: {diag.size_bytes}\n"
